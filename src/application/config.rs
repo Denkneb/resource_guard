@@ -1,6 +1,6 @@
 use std::{error::Error, fmt, path::PathBuf, time::Duration};
 
-use crate::domain::{ProtectionPolicy, Thresholds, ViolationPolicy};
+use crate::domain::{IgnoreRule, ProtectionPolicy, Thresholds, ViolationPolicy};
 
 const BYTES_PER_MIB: u64 = 1_048_576;
 
@@ -9,6 +9,7 @@ pub struct Settings {
     pub monitor: MonitorSettings,
     pub termination: TerminationSettings,
     pub processes: ProcessSettings,
+    pub notifications: NotificationSettings,
 }
 
 impl Settings {
@@ -32,6 +33,9 @@ impl Settings {
         }
         if self.termination.grace_period.is_zero() {
             return Err(ConfigValidationError::ZeroGracePeriod);
+        }
+        if self.notifications.timeout.is_zero() {
+            return Err(ConfigValidationError::ZeroNotificationTimeout);
         }
 
         for path in self
@@ -73,6 +77,36 @@ impl Settings {
             self.processes.ignored_names.clone(),
             self.processes.ignored_executables.clone(),
         )
+    }
+
+    pub fn add_ignore_rule(&mut self, rule: IgnoreRule) {
+        match rule {
+            IgnoreRule::Name(name) => {
+                if !self.processes.ignored_names.contains(&name) {
+                    self.processes.ignored_names.push(name);
+                }
+            }
+            IgnoreRule::Executable(path) => {
+                if !self.processes.ignored_executables.contains(&path) {
+                    self.processes.ignored_executables.push(path);
+                }
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct NotificationSettings {
+    pub enabled: bool,
+    pub timeout: Duration,
+}
+
+impl Default for NotificationSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            timeout: Duration::from_secs(15),
+        }
     }
 }
 
@@ -138,6 +172,7 @@ pub enum ConfigValidationError {
     InvalidCpuThreshold,
     ZeroMemoryThreshold,
     ZeroGracePeriod,
+    ZeroNotificationTimeout,
     RelativeExecutable(PathBuf),
 }
 
@@ -158,6 +193,9 @@ impl fmt::Display for ConfigValidationError {
                 write!(formatter, "memory threshold must be greater than zero")
             }
             Self::ZeroGracePeriod => write!(formatter, "grace period must be greater than zero"),
+            Self::ZeroNotificationTimeout => {
+                write!(formatter, "notification timeout must be greater than zero")
+            }
             Self::RelativeExecutable(path) => write!(
                 formatter,
                 "protected and ignored executable paths must be absolute: {}",
@@ -226,6 +264,17 @@ mod tests {
         assert_eq!(
             settings.violation_policy().minimum_duration,
             Duration::from_secs(10)
+        );
+    }
+
+    #[test]
+    fn rejects_zero_notification_timeout() {
+        let mut settings = Settings::default();
+        settings.notifications.timeout = Duration::ZERO;
+
+        assert_eq!(
+            settings.validate(),
+            Err(ConfigValidationError::ZeroNotificationTimeout)
         );
     }
 }

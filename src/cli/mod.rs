@@ -170,6 +170,9 @@ pub fn execute(cli: Cli) -> Result<(), CliError> {
             if let Some(error) = status.last_error {
                 println!("last error: {error}");
             }
+            if let Some(error) = status.notification_error {
+                println!("notification error: {error}");
+            }
             Ok(())
         }
         Command::Top { watch } => execute_top(watch),

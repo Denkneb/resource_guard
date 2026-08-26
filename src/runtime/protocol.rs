@@ -27,6 +27,7 @@ pub struct StatusResponse {
     pub monitored_processes: usize,
     pub active_events: usize,
     pub last_error: Option<String>,
+    pub notification_error: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -66,6 +67,7 @@ mod tests {
                 monitored_processes: 2,
                 active_events: 0,
                 last_error: None,
+                notification_error: None,
             },
         };
         let encoded = serde_json::to_vec(&response).unwrap();

@@ -37,6 +37,8 @@ fn config_show_prints_effective_defaults() {
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("poll_interval_seconds = 5"));
     assert!(stdout.contains("protected_names = [\"resource-guard\"]"));
+    assert!(stdout.contains("[notifications]"));
+    assert!(stdout.contains("timeout_seconds = 15"));
 }
 
 #[test]

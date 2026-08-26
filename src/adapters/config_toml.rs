@@ -3,13 +3,14 @@ use std::{
     fmt, fs,
     io::{self, Write},
     path::{Path, PathBuf},
-    time::Duration,
+    time::{Duration, SystemTime},
 };
 
 use serde::{Deserialize, Serialize};
 
 use crate::application::{
-    ConfigValidationError, MonitorSettings, ProcessSettings, Settings, TerminationSettings,
+    ConfigValidationError, MonitorSettings, NotificationSettings, ProcessSettings, Settings,
+    TerminationSettings,
 };
 
 use super::{ConfigPathError, resolve_config_path};
@@ -101,6 +102,58 @@ impl TomlConfigRepository {
                 message: error.to_string(),
             }
         })
+    }
+
+    /// Atomically replaces the configuration with the supplied validated settings.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when validation, serialization, directory creation, writing,
+    /// syncing, or atomic replacement fails.
+    pub fn save(&self, settings: &Settings) -> Result<(), ConfigError> {
+        settings.validate().map_err(ConfigError::Validation)?;
+        let contents = Self::render(settings)?;
+        let Some(parent) = self.path.parent() else {
+            return Err(ConfigError::Write {
+                path: self.path.clone(),
+                message: "config path has no parent directory".to_owned(),
+            });
+        };
+        fs::create_dir_all(parent).map_err(|error| ConfigError::CreateDirectory {
+            path: parent.to_path_buf(),
+            message: error.to_string(),
+        })?;
+        let nonce = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let temporary = self
+            .path
+            .with_extension(format!("tmp-{}-{nonce}", std::process::id()));
+        let result = (|| {
+            let mut file = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temporary)
+                .map_err(|error| ConfigError::Write {
+                    path: temporary.clone(),
+                    message: error.to_string(),
+                })?;
+            file.write_all(contents.as_bytes())
+                .and_then(|()| file.sync_all())
+                .map_err(|error| ConfigError::Write {
+                    path: temporary.clone(),
+                    message: error.to_string(),
+                })?;
+            fs::rename(&temporary, &self.path).map_err(|error| ConfigError::Write {
+                path: self.path.clone(),
+                message: error.to_string(),
+            })
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(temporary);
+        }
+        result
     }
 
     /// Creates a default configuration file.
@@ -199,6 +252,7 @@ struct ConfigDocument {
     monitor: MonitorDocument,
     termination: TerminationDocument,
     processes: ProcessDocument,
+    notifications: NotificationDocument,
 }
 
 impl Default for ConfigDocument {
@@ -228,6 +282,19 @@ impl Default for MonitorDocument {
 #[serde(default, deny_unknown_fields)]
 struct TerminationDocument {
     grace_period_seconds: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+struct NotificationDocument {
+    enabled: bool,
+    timeout_seconds: u64,
+}
+
+impl Default for NotificationDocument {
+    fn default() -> Self {
+        Self::from(&NotificationSettings::default())
+    }
 }
 
 impl Default for TerminationDocument {
@@ -268,6 +335,10 @@ impl From<ConfigDocument> for Settings {
                 ignored_names: document.processes.ignored_names,
                 ignored_executables: document.processes.ignored_executables,
             },
+            notifications: NotificationSettings {
+                enabled: document.notifications.enabled,
+                timeout: Duration::from_secs(document.notifications.timeout_seconds),
+            },
         }
     }
 }
@@ -278,6 +349,7 @@ impl From<&Settings> for ConfigDocument {
             monitor: MonitorDocument::from(&settings.monitor),
             termination: TerminationDocument::from(&settings.termination),
             processes: ProcessDocument::from(&settings.processes),
+            notifications: NotificationDocument::from(&settings.notifications),
         }
     }
 }
@@ -299,6 +371,15 @@ impl From<&TerminationSettings> for TerminationDocument {
     fn from(settings: &TerminationSettings) -> Self {
         Self {
             grace_period_seconds: settings.grace_period.as_secs(),
+        }
+    }
+}
+
+impl From<&NotificationSettings> for NotificationDocument {
+    fn from(settings: &NotificationSettings) -> Self {
+        Self {
+            enabled: settings.enabled,
+            timeout_seconds: settings.timeout.as_secs(),
         }
     }
 }
@@ -401,5 +482,19 @@ mod tests {
         let document: super::ConfigDocument = toml::from_str(&rendered).unwrap();
 
         assert_eq!(crate::application::Settings::from(document), defaults);
+    }
+
+    #[test]
+    fn save_atomically_persists_updated_settings() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        let repository = TomlConfigRepository::new(&path);
+        let mut settings = crate::application::Settings::default();
+        settings.processes.ignored_names.push("compiler".to_owned());
+
+        repository.save(&settings).unwrap();
+
+        assert_eq!(repository.load().unwrap().settings, settings);
+        assert!(fs::read_to_string(path).unwrap().contains("compiler"));
     }
 }

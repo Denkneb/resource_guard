@@ -29,6 +29,7 @@ fn resource_guard() -> Command {
 
 fn isolated_command(directory: &TempDir) -> Command {
     let mut command = resource_guard();
+    let missing_bus = directory.path().join("missing-session-bus");
     command
         .env(
             "RESOURCE_GUARD_RUNTIME_DIR",
@@ -37,6 +38,10 @@ fn isolated_command(directory: &TempDir) -> Command {
         .env(
             "RESOURCE_GUARD_CONFIG",
             directory.path().join("config.toml"),
+        )
+        .env(
+            "DBUS_SESSION_BUS_ADDRESS",
+            format!("unix:path={}", missing_bus.display()),
         );
     command
 }
@@ -78,6 +83,7 @@ fn status_reports_running_daemon_and_secure_socket_permissions() {
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("daemon: running"));
     assert!(stdout.contains("processes:"));
+    assert!(stdout.contains("notification error:"));
 
     let runtime = directory.path().join("runtime");
     let socket = runtime.join("control.sock");

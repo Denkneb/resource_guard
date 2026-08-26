@@ -77,6 +77,14 @@ where
         self.tracked_identities.remove(&identity);
     }
 
+    pub fn ignore_permanently(&mut self, process: &ProcessDescriptor) {
+        let identity = process.identity();
+        self.protection
+            .ignore(crate::domain::IgnoreRule::for_process(process));
+        self.violations.forget(identity);
+        self.tracked_identities.remove(&identity);
+    }
+
     /// Performs one monitoring cycle.
     ///
     /// # Errors
@@ -285,6 +293,17 @@ mod tests {
         let (mut service, time) = service(vec![process], ProtectionPolicy::default());
         service.ignore_for(identity, Duration::from_secs(60));
         time.set(Duration::from_secs(10));
+
+        assert_eq!(service.poll().unwrap().monitored_processes, 0);
+    }
+
+    #[test]
+    fn permanently_ignored_process_is_removed_from_monitoring() {
+        let process = observed(42, CURRENT_UID, "worker");
+        let descriptor = process.descriptor.clone();
+        let (mut service, _) = service(vec![process], ProtectionPolicy::default());
+
+        service.ignore_permanently(&descriptor);
 
         assert_eq!(service.poll().unwrap().monitored_processes, 0);
     }

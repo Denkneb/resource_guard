@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     fs, io,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
@@ -17,8 +18,15 @@ use tracing::{info, warn};
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
 use crate::{
-    adapters::{SysinfoProcessSource, SystemClock, TomlConfigRepository, current_user_id},
-    application::MonitorService,
+    adapters::{
+        PidfdTerminationPort, SysinfoProcessSource, SystemClock, TomlConfigRepository,
+        ZbusNotificationSink, current_user_id,
+    },
+    application::{
+        MonitorEvent, MonitorService, NotificationAction, NotificationEvent, NotificationRequest,
+        NotificationSink, StopProcess,
+    },
+    domain::IgnoreRule,
 };
 
 use super::{
@@ -31,6 +39,8 @@ use super::{
 const MAX_REQUEST_BYTES: u64 = 8 * 1_024;
 const MAX_RESPONSE_BYTES: u64 = 1_024 * 1_024;
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(2);
+const NOTIFICATION_RETRY_INTERVAL: Duration = Duration::from_secs(60);
+const MAX_NOTIFICATION_BINDINGS: usize = 256;
 
 /// Runs the foreground monitoring daemon until SIGINT or SIGTERM is received.
 ///
@@ -80,7 +90,7 @@ fn initialize_tracing() {
 
 async fn run_daemon_async() -> Result<(), RuntimeError> {
     let repository = TomlConfigRepository::from_environment()?;
-    let settings = repository.load()?.settings;
+    let mut settings = repository.load()?.settings;
     let socket_path = control_socket_path()?;
     let listener = bind_control_socket(&socket_path).await?;
     let _socket_guard = SocketGuard::new(socket_path.clone());
@@ -93,6 +103,21 @@ async fn run_daemon_async() -> Result<(), RuntimeError> {
         settings.protection_policy(),
         settings.violation_policy(),
     );
+    let (notification_sender, mut notification_events) = tokio::sync::mpsc::channel(64);
+    let mut notifier = if settings.notifications.enabled {
+        connect_notifications(
+            notification_sender.clone(),
+            settings.notifications.timeout,
+            &state,
+        )
+        .await
+    } else {
+        None
+    };
+    let mut notification_bindings = HashMap::<u32, MonitorEvent>::new();
+    let mut notification_retry = tokio::time::interval(NOTIFICATION_RETRY_INTERVAL);
+    notification_retry.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    notification_retry.tick().await;
     let mut interval = tokio::time::interval(settings.monitor.poll_interval);
     interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let shutdown = shutdown_signal();
@@ -103,23 +128,13 @@ async fn run_daemon_async() -> Result<(), RuntimeError> {
         tokio::select! {
             _ = interval.tick() => {
                 match monitor.poll() {
-                    Ok(report) => {
-                        for event in &report.events {
-                            warn!(
-                                pid = event.process.identity().pid(),
-                                process = event.process.name(),
-                                cpu_percent = event.resources.cpu_percent,
-                                memory_bytes = event.resources.resident_memory_bytes,
-                                exceeded_seconds = event.exceeded_for.as_secs(),
-                                "process exceeded configured resource limits"
-                            );
-                        }
-                        state.write().await.record_report(&report);
-                    }
-                    Err(error) => {
-                        warn!(%error, "resource polling failed");
-                        state.write().await.record_error(error.to_string());
-                    }
+                    Ok(report) => record_monitor_report(
+                        report,
+                        &mut notifier,
+                        &mut notification_bindings,
+                        &state,
+                    ).await,
+                    Err(error) => record_poll_error(&state, error).await,
                 }
             }
             accepted = listener.accept() => {
@@ -135,6 +150,34 @@ async fn run_daemon_async() -> Result<(), RuntimeError> {
                     Err(error) => warn!(%error, "cannot accept control connection"),
                 }
             }
+            Some(event) = notification_events.recv(), if settings.notifications.enabled => {
+                match event {
+                    Ok(event) => {
+                        handle_notification_event(
+                            event,
+                            &mut notification_bindings,
+                            &mut monitor,
+                            &mut notifier,
+                            &repository,
+                            &mut settings,
+                            &state,
+                        ).await;
+                    }
+                    Err(error) => {
+                        warn!(%error, "desktop notification event stream failed");
+                        state.write().await.record_notification_error(error.to_string());
+                        notification_bindings.clear();
+                        notifier = None;
+                    }
+                }
+            }
+            _ = notification_retry.tick(), if settings.notifications.enabled && notifier.is_none() => {
+                notifier = connect_notifications(
+                    notification_sender.clone(),
+                    settings.notifications.timeout,
+                    &state,
+                ).await;
+            }
             result = &mut shutdown => {
                 result?;
                 break;
@@ -143,6 +186,189 @@ async fn run_daemon_async() -> Result<(), RuntimeError> {
     }
     info!("resource guard daemon stopped");
     Ok(())
+}
+
+async fn record_poll_error(state: &Arc<RwLock<DaemonState>>, error: crate::application::PortError) {
+    warn!(%error, "resource polling failed");
+    state.write().await.record_error(error.to_string());
+}
+
+async fn record_monitor_report(
+    report: crate::application::MonitorReport,
+    notifier: &mut Option<ZbusNotificationSink>,
+    bindings: &mut HashMap<u32, MonitorEvent>,
+    state: &Arc<RwLock<DaemonState>>,
+) {
+    for event in &report.events {
+        warn!(
+            pid = event.process.identity().pid(),
+            process = event.process.name(),
+            cpu_percent = event.resources.cpu_percent,
+            memory_bytes = event.resources.resident_memory_bytes,
+            exceeded_seconds = event.exceeded_for.as_secs(),
+            "process exceeded configured resource limits"
+        );
+        if let Some(sink) = notifier.as_mut() {
+            match sink.notify(NotificationRequest::from_event(event)).await {
+                Ok(notification_id) => {
+                    remember_notification(bindings, notification_id, event.clone());
+                    state.write().await.clear_notification_error();
+                }
+                Err(error) => {
+                    warn!(%error, "desktop notification failed");
+                    state
+                        .write()
+                        .await
+                        .record_notification_error(error.to_string());
+                    bindings.clear();
+                    *notifier = None;
+                }
+            }
+        }
+    }
+    state.write().await.record_report(&report);
+}
+
+async fn connect_notifications(
+    sender: tokio::sync::mpsc::Sender<Result<NotificationEvent, crate::application::PortError>>,
+    timeout: Duration,
+    state: &Arc<RwLock<DaemonState>>,
+) -> Option<ZbusNotificationSink> {
+    match ZbusNotificationSink::connect(sender, timeout).await {
+        Ok(sink) => {
+            info!(
+                actions = sink.supports_actions(),
+                "desktop notifications connected"
+            );
+            state.write().await.clear_notification_error();
+            Some(sink)
+        }
+        Err(error) => {
+            warn!(%error, "desktop notifications unavailable; monitoring continues");
+            state
+                .write()
+                .await
+                .record_notification_error(error.to_string());
+            None
+        }
+    }
+}
+
+fn remember_notification(
+    bindings: &mut HashMap<u32, MonitorEvent>,
+    notification_id: u32,
+    event: MonitorEvent,
+) {
+    if bindings.len() >= MAX_NOTIFICATION_BINDINGS
+        && let Some(expired) = bindings.keys().copied().min()
+    {
+        bindings.remove(&expired);
+    }
+    bindings.insert(notification_id, event);
+}
+
+async fn handle_notification_event(
+    event: NotificationEvent,
+    bindings: &mut HashMap<u32, MonitorEvent>,
+    monitor: &mut MonitorService<SysinfoProcessSource, SystemClock>,
+    notifier: &mut Option<ZbusNotificationSink>,
+    repository: &TomlConfigRepository,
+    settings: &mut crate::application::Settings,
+    state: &Arc<RwLock<DaemonState>>,
+) {
+    let (notification_id, action) = match event {
+        NotificationEvent::Action {
+            notification_id,
+            action,
+        } => (notification_id, action),
+        NotificationEvent::Closed { notification_id } => {
+            bindings.remove(&notification_id);
+            return;
+        }
+        NotificationEvent::UnknownAction {
+            notification_id,
+            key,
+        } => {
+            if bindings.contains_key(&notification_id) {
+                warn!(notification_id, %key, "ignoring unknown notification action");
+            }
+            return;
+        }
+    };
+    let Some(monitored_event) = bindings.remove(&notification_id) else {
+        warn!(
+            notification_id,
+            "ignoring action for an unknown notification"
+        );
+        return;
+    };
+
+    match action {
+        NotificationAction::Stop => {
+            let identity = monitored_event.process.identity();
+            let mut source = SysinfoProcessSource::new();
+            let mut terminator = PidfdTerminationPort;
+            let policy = settings.protection_policy();
+            match StopProcess::new(&mut source, &mut terminator, current_user_id(), &policy)
+                .execute(identity)
+            {
+                Ok(()) => info!(
+                    pid = identity.pid(),
+                    "SIGTERM sent from notification action"
+                ),
+                Err(error) => {
+                    warn!(pid = identity.pid(), %error, "notification stop action rejected");
+                }
+            }
+        }
+        NotificationAction::IgnoreForHour => {
+            monitor.ignore_for(
+                monitored_event.process.identity(),
+                Duration::from_secs(60 * 60),
+            );
+            info!(
+                pid = monitored_event.process.identity().pid(),
+                "process ignored for one hour"
+            );
+        }
+        NotificationAction::AlwaysIgnore => {
+            let rule = IgnoreRule::for_process(&monitored_event.process);
+            let mut updated = settings.clone();
+            updated.add_ignore_rule(rule);
+            match repository.save(&updated) {
+                Ok(()) => {
+                    *settings = updated;
+                    monitor.ignore_permanently(&monitored_event.process);
+                    info!(
+                        pid = monitored_event.process.identity().pid(),
+                        "process permanently ignored"
+                    );
+                }
+                Err(error) => {
+                    warn!(%error, "cannot persist permanent process ignore");
+                    state
+                        .write()
+                        .await
+                        .record_notification_error(error.to_string());
+                }
+            }
+        }
+        NotificationAction::Details => {
+            if let Some(sink) = notifier.as_mut()
+                && let Err(error) = sink
+                    .notify(NotificationRequest::details(&monitored_event))
+                    .await
+            {
+                warn!(%error, "cannot display notification details");
+                state
+                    .write()
+                    .await
+                    .record_notification_error(error.to_string());
+                bindings.clear();
+                *notifier = None;
+            }
+        }
+    }
 }
 
 async fn shutdown_signal() -> Result<(), RuntimeError> {

@@ -20,6 +20,7 @@ pub(crate) struct DaemonState {
     active_events: usize,
     processes: Vec<TopProcess>,
     last_error: Option<String>,
+    notification_error: Option<String>,
 }
 
 impl DaemonState {
@@ -36,6 +37,7 @@ impl DaemonState {
             active_events: 0,
             processes: Vec::new(),
             last_error: None,
+            notification_error: None,
         }
     }
 
@@ -84,7 +86,16 @@ impl DaemonState {
             monitored_processes: self.monitored_processes,
             active_events: self.active_events,
             last_error: self.last_error.clone(),
+            notification_error: self.notification_error.clone(),
         }
+    }
+
+    pub(crate) fn record_notification_error(&mut self, error: impl Into<String>) {
+        self.notification_error = Some(error.into());
+    }
+
+    pub(crate) fn clear_notification_error(&mut self) {
+        self.notification_error = None;
     }
 
     pub(crate) fn top(&self) -> TopResponse {

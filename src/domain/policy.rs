@@ -13,6 +13,22 @@ pub enum ProcessDisposition {
     Protect,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum IgnoreRule {
+    Name(String),
+    Executable(PathBuf),
+}
+
+impl IgnoreRule {
+    #[must_use]
+    pub fn for_process(process: &ProcessDescriptor) -> Self {
+        process.executable().map_or_else(
+            || Self::Name(process.name().to_owned()),
+            |path| Self::Executable(path.to_path_buf()),
+        )
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct ProtectionPolicy {
     protected_names: HashSet<String>,
@@ -59,6 +75,17 @@ impl ProtectionPolicy {
     #[must_use]
     pub fn is_protected_executable(&self, executable: &Path) -> bool {
         self.protected_executables.contains(executable)
+    }
+
+    pub fn ignore(&mut self, rule: IgnoreRule) {
+        match rule {
+            IgnoreRule::Name(name) => {
+                self.ignored_names.insert(name);
+            }
+            IgnoreRule::Executable(path) => {
+                self.ignored_executables.insert(path);
+            }
+        }
     }
 }
 
@@ -140,5 +167,19 @@ mod tests {
         registry.ignore_until(original, Duration::from_secs(60));
 
         assert!(!registry.is_ignored(reused, Duration::from_secs(10)));
+    }
+
+    #[test]
+    fn permanent_ignore_prefers_an_executable_path() {
+        let worker = process("worker", "/usr/bin/worker");
+        let mut policy = ProtectionPolicy::default();
+
+        policy.ignore(super::IgnoreRule::for_process(&worker));
+
+        assert_eq!(policy.disposition(&worker), ProcessDisposition::Ignore);
+        assert_eq!(
+            policy.disposition(&process("worker", "/opt/other-worker")),
+            ProcessDisposition::Monitor
+        );
     }
 }
