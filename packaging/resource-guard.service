@@ -1,0 +1,36 @@
+[Unit]
+Description=Resource Guard process resource monitor
+Documentation=https://github.com/Denkneb/resource_guard
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/resource-guard daemon
+Restart=on-failure
+RestartSec=5s
+KillSignal=SIGTERM
+TimeoutStopSec=20s
+Environment=RUST_LOG=resource_guard=info
+
+RuntimeDirectory=resource-guard
+RuntimeDirectoryMode=0700
+UMask=0077
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectClock=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_UNIX
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+[Install]
+WantedBy=default.target

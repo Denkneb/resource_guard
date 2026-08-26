@@ -1,0 +1,20 @@
+[monitor]
+poll_interval_seconds = 5
+consecutive_samples = 3
+minimum_duration_seconds = 10
+cooldown_seconds = 600
+max_cpu_percent = 90.0
+max_memory_mib = 2048
+
+[termination]
+grace_period_seconds = 10
+
+[processes]
+protected_names = ["resource-guard"]
+protected_executables = []
+ignored_names = []
+ignored_executables = []
+
+[notifications]
+enabled = true
+timeout_seconds = 15
