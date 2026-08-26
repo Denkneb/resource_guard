@@ -1,3 +1,5 @@
-fn main() {
-    println!("resource-guard: daemon and CLI adapters are not implemented yet");
+use std::process::ExitCode;
+
+fn main() -> ExitCode {
+    resource_guard::cli::run_from_environment()
 }
