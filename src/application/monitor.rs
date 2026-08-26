@@ -21,6 +21,7 @@ pub struct MonitorReport {
     pub system: SystemResources,
     pub observed_processes: usize,
     pub monitored_processes: usize,
+    pub processes: Vec<super::ObservedProcess>,
     pub events: Vec<MonitorEvent>,
 }
 
@@ -82,6 +83,7 @@ where
         let observed_processes = snapshot.processes.len();
         let mut active_identities = HashSet::new();
         let mut monitored_processes = 0;
+        let mut processes = Vec::new();
         let mut events = Vec::new();
 
         for observed in snapshot.processes {
@@ -101,12 +103,13 @@ where
                 self.violations.evaluate(identity, breach, now)
             {
                 events.push(MonitorEvent {
-                    process: observed.descriptor,
+                    process: observed.descriptor.clone(),
                     resources: observed.resources,
                     breach,
                     exceeded_for: elapsed,
                 });
             }
+            processes.push(observed);
         }
 
         for stale in self.tracked_identities.difference(&active_identities) {
@@ -118,6 +121,7 @@ where
             system: snapshot.system,
             observed_processes,
             monitored_processes,
+            processes,
             events,
         })
     }
@@ -247,6 +251,7 @@ mod tests {
         let report = service.poll().unwrap();
         assert_eq!(report.observed_processes, 1);
         assert_eq!(report.monitored_processes, 0);
+        assert!(report.processes.is_empty());
     }
 
     #[test]

@@ -8,6 +8,7 @@ use crate::{
         TomlConfigRepository, current_user_id,
     },
     application::{PortError, ProcessSource, StopAndWait, StopError, StopOutcome},
+    runtime::{self, RuntimeError},
 };
 
 #[derive(Debug, Parser)]
@@ -68,6 +69,7 @@ pub enum CliError {
     ProcessNotFound(u32),
     StillRunning { pid: u32, grace_period_seconds: u64 },
     KillNotImplemented,
+    Runtime(RuntimeError),
     NotImplemented(&'static str),
 }
 
@@ -89,6 +91,7 @@ impl fmt::Display for CliError {
                 formatter,
                 "SIGKILL is not implemented yet; no signal was sent"
             ),
+            Self::Runtime(error) => error.fmt(formatter),
             Self::NotImplemented(command) => {
                 write!(formatter, "command '{command}' is not implemented yet")
             }
@@ -107,6 +110,12 @@ impl From<crate::adapters::ConfigError> for CliError {
 impl From<StopError> for CliError {
     fn from(error: StopError) -> Self {
         Self::Stop(error)
+    }
+}
+
+impl From<RuntimeError> for CliError {
+    fn from(error: RuntimeError) -> Self {
+        Self::Runtime(error)
     }
 }
 
@@ -130,8 +139,30 @@ pub fn run_from_environment() -> ExitCode {
 pub fn execute(cli: Cli) -> Result<(), CliError> {
     match cli.command {
         Command::Config { command } => execute_config(command.as_ref()),
-        Command::Daemon => Err(CliError::NotImplemented("daemon")),
-        Command::Status => Err(CliError::NotImplemented("status")),
+        Command::Daemon => runtime::run_daemon().map_err(Into::into),
+        Command::Status => {
+            let status = runtime::query_status()?;
+            println!("daemon: running");
+            println!("uptime: {}s", status.uptime_seconds);
+            println!("last poll: {}s ago", status.last_poll_age_seconds);
+            println!(
+                "processes: {} observed, {} monitored",
+                status.observed_processes, status.monitored_processes
+            );
+            println!(
+                "memory: {} / {} bytes available",
+                status.available_memory_bytes, status.total_memory_bytes
+            );
+            println!(
+                "swap: {} / {} bytes used",
+                status.used_swap_bytes, status.total_swap_bytes
+            );
+            println!("active events: {}", status.active_events);
+            if let Some(error) = status.last_error {
+                println!("last error: {error}");
+            }
+            Ok(())
+        }
         Command::Top { watch } => {
             let _ = watch;
             Err(CliError::NotImplemented("top"))
