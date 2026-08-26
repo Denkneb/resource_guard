@@ -4,12 +4,14 @@ use serde::{Deserialize, Serialize};
 #[serde(tag = "command", rename_all = "snake_case")]
 pub(crate) enum ControlRequest {
     Status,
+    Top,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "result", rename_all = "snake_case")]
 pub(crate) enum ControlResponse {
     Status { status: StatusResponse },
+    Top { top: TopResponse },
     Error { message: String },
 }
 
@@ -27,9 +29,25 @@ pub struct StatusResponse {
     pub last_error: Option<String>,
 }
 
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct TopResponse {
+    pub sample_age_seconds: u64,
+    pub processes: Vec<TopProcess>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct TopProcess {
+    pub pid: u32,
+    pub name: String,
+    pub cpu_percent: f32,
+    pub resident_memory_bytes: u64,
+    pub running_for_seconds: u64,
+    pub exceeds_limit: bool,
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{ControlRequest, ControlResponse, StatusResponse};
+    use super::{ControlRequest, ControlResponse, StatusResponse, TopProcess, TopResponse};
 
     #[test]
     fn status_protocol_round_trips() {
@@ -54,6 +72,31 @@ mod tests {
         assert!(matches!(
             serde_json::from_slice(&encoded).unwrap(),
             ControlResponse::Status { .. }
+        ));
+    }
+
+    #[test]
+    fn top_protocol_round_trips() {
+        let request = serde_json::to_string(&ControlRequest::Top).unwrap();
+        assert_eq!(request, r#"{"command":"top"}"#);
+
+        let response = ControlResponse::Top {
+            top: TopResponse {
+                sample_age_seconds: 1,
+                processes: vec![TopProcess {
+                    pid: 42,
+                    name: "worker".to_owned(),
+                    cpu_percent: 75.0,
+                    resident_memory_bytes: 4096,
+                    running_for_seconds: 60,
+                    exceeds_limit: true,
+                }],
+            },
+        };
+        let encoded = serde_json::to_vec(&response).unwrap();
+        assert!(matches!(
+            serde_json::from_slice(&encoded).unwrap(),
+            ControlResponse::Top { .. }
         ));
     }
 }

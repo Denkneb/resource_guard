@@ -1,4 +1,8 @@
-use std::{io, path::PathBuf, time::SystemTime};
+use std::{
+    io,
+    path::PathBuf,
+    time::{Duration, SystemTime},
+};
 
 use sysinfo::{
     Pid, Process, ProcessRefreshKind, ProcessStatus, ProcessesToUpdate, System, UpdateKind,
@@ -53,6 +57,7 @@ impl SysinfoProcessSource {
                 cpu_percent: process.cpu_usage(),
                 resident_memory_bytes: process.memory(),
                 virtual_memory_bytes: process.virtual_memory(),
+                running_for: Duration::from_secs(process.run_time()),
                 observed_at,
             },
         })

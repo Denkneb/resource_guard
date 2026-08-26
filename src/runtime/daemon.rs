@@ -24,11 +24,12 @@ use crate::{
 use super::{
     RuntimeError,
     paths::{control_socket_path, prepare_runtime_directory},
-    protocol::{ControlRequest, ControlResponse, StatusResponse},
+    protocol::{ControlRequest, ControlResponse, StatusResponse, TopResponse},
     state::DaemonState,
 };
 
-const MAX_MESSAGE_BYTES: u64 = 8 * 1_024;
+const MAX_REQUEST_BYTES: u64 = 8 * 1_024;
+const MAX_RESPONSE_BYTES: u64 = 1_024 * 1_024;
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Runs the foreground monitoring daemon until SIGINT or SIGTERM is received.
@@ -50,6 +51,16 @@ pub fn run_daemon() -> Result<(), RuntimeError> {
 /// reached, or its response is invalid.
 pub fn query_status() -> Result<StatusResponse, RuntimeError> {
     build_runtime()?.block_on(query_status_async())
+}
+
+/// Fetches the latest monitored process snapshot from the daemon.
+///
+/// # Errors
+///
+/// Returns an error when the runtime path is unavailable, the daemon cannot be
+/// reached, or its response is invalid.
+pub fn query_top() -> Result<TopResponse, RuntimeError> {
+    build_runtime()?.block_on(query_top_async())
 }
 
 fn build_runtime() -> Result<tokio::runtime::Runtime, RuntimeError> {
@@ -192,13 +203,13 @@ async fn handle_client(
     timeout(
         CONTROL_TIMEOUT,
         (&mut stream)
-            .take(MAX_MESSAGE_BYTES + 1)
+            .take(MAX_REQUEST_BYTES + 1)
             .read_to_end(&mut bytes),
     )
     .await
     .map_err(|_| RuntimeError::Protocol("request timed out".to_owned()))?
     .map_err(|error| RuntimeError::io("read control request", error))?;
-    if bytes.len() as u64 > MAX_MESSAGE_BYTES {
+    if bytes.len() as u64 > MAX_REQUEST_BYTES {
         return write_response(
             &mut stream,
             &ControlResponse::Error {
@@ -211,6 +222,9 @@ async fn handle_client(
     let response = match serde_json::from_slice::<ControlRequest>(&bytes) {
         Ok(ControlRequest::Status) => ControlResponse::Status {
             status: state.read().await.status(),
+        },
+        Ok(ControlRequest::Top) => ControlResponse::Top {
+            top: state.read().await.top(),
         },
         Err(error) => ControlResponse::Error {
             message: format!("invalid request: {error}"),
@@ -236,12 +250,32 @@ async fn write_response(
 }
 
 async fn query_status_async() -> Result<StatusResponse, RuntimeError> {
+    match query(ControlRequest::Status).await? {
+        ControlResponse::Status { status } => Ok(status),
+        ControlResponse::Error { message } => Err(RuntimeError::Protocol(message)),
+        ControlResponse::Top { .. } => Err(RuntimeError::Protocol(
+            "daemon returned top data for a status request".to_owned(),
+        )),
+    }
+}
+
+async fn query_top_async() -> Result<TopResponse, RuntimeError> {
+    match query(ControlRequest::Top).await? {
+        ControlResponse::Top { top } => Ok(top),
+        ControlResponse::Error { message } => Err(RuntimeError::Protocol(message)),
+        ControlResponse::Status { .. } => Err(RuntimeError::Protocol(
+            "daemon returned status data for a top request".to_owned(),
+        )),
+    }
+}
+
+async fn query(request: ControlRequest) -> Result<ControlResponse, RuntimeError> {
     let path = control_socket_path()?;
     let mut stream = timeout(CONTROL_TIMEOUT, UnixStream::connect(&path))
         .await
         .map_err(|_| RuntimeError::Protocol("connection timed out".to_owned()))?
         .map_err(|error| RuntimeError::io("connect to daemon", error))?;
-    let request = serde_json::to_vec(&ControlRequest::Status)
+    let request = serde_json::to_vec(&request)
         .map_err(|error| RuntimeError::Protocol(format!("cannot encode request: {error}")))?;
     stream
         .write_all(&request)
@@ -256,21 +290,17 @@ async fn query_status_async() -> Result<StatusResponse, RuntimeError> {
     timeout(
         CONTROL_TIMEOUT,
         (&mut stream)
-            .take(MAX_MESSAGE_BYTES + 1)
+            .take(MAX_RESPONSE_BYTES + 1)
             .read_to_end(&mut bytes),
     )
     .await
     .map_err(|_| RuntimeError::Protocol("response timed out".to_owned()))?
     .map_err(|error| RuntimeError::io("read control response", error))?;
-    if bytes.len() as u64 > MAX_MESSAGE_BYTES {
+    if bytes.len() as u64 > MAX_RESPONSE_BYTES {
         return Err(RuntimeError::Protocol("response is too large".to_owned()));
     }
-    match serde_json::from_slice(&bytes)
-        .map_err(|error| RuntimeError::Protocol(format!("invalid response: {error}")))?
-    {
-        ControlResponse::Status { status } => Ok(status),
-        ControlResponse::Error { message } => Err(RuntimeError::Protocol(message)),
-    }
+    serde_json::from_slice(&bytes)
+        .map_err(|error| RuntimeError::Protocol(format!("invalid response: {error}")))
 }
 
 struct SocketGuard {

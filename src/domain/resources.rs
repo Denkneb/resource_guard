@@ -5,6 +5,7 @@ pub struct ProcessResources {
     pub cpu_percent: f32,
     pub resident_memory_bytes: u64,
     pub virtual_memory_bytes: u64,
+    pub running_for: Duration,
     pub observed_at: Duration,
 }
 
@@ -59,6 +60,7 @@ mod tests {
             cpu_percent,
             resident_memory_bytes,
             virtual_memory_bytes: resident_memory_bytes * 2,
+            running_for: Duration::from_secs(60),
             observed_at: Duration::ZERO,
         }
     }

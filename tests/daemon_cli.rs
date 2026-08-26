@@ -146,3 +146,57 @@ fn status_fails_when_daemon_is_absent() {
             .contains("connect to daemon")
     );
 }
+
+#[test]
+fn top_reports_a_process_from_the_daemon_snapshot() {
+    let directory = tempfile::tempdir().unwrap();
+    let worker = Command::new("sleep").arg("30").spawn().unwrap();
+    let worker = DaemonGuard { child: worker };
+    let _daemon = start_daemon(&directory);
+
+    let output = isolated_command(&directory).arg("top").output().unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("PID"));
+    assert!(stdout.contains("CPU"));
+    assert!(stdout.contains("RAM"));
+    assert!(stdout.contains("AGE"));
+    assert!(stdout.contains(&worker.child.id().to_string()));
+    assert!(stdout.contains("sleep"));
+}
+
+#[test]
+fn top_fails_when_daemon_is_absent() {
+    let directory = tempfile::tempdir().unwrap();
+    let output = isolated_command(&directory).arg("top").output().unwrap();
+
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8(output.stderr)
+            .unwrap()
+            .contains("connect to daemon")
+    );
+}
+
+#[test]
+fn top_watch_renders_and_refreshes_the_terminal_view() {
+    let directory = tempfile::tempdir().unwrap();
+    let _daemon = start_daemon(&directory);
+    let output_path = directory.path().join("top-watch.txt");
+    let output_file = fs::File::create(&output_path).unwrap();
+    let mut top = isolated_command(&directory)
+        .args(["top", "--watch"])
+        .stdout(Stdio::from(output_file))
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+
+    thread::sleep(Duration::from_millis(150));
+    top.kill().unwrap();
+    top.wait().unwrap();
+
+    let output = fs::read_to_string(output_path).unwrap();
+    assert!(output.starts_with("\x1b[2J\x1b[H"));
+    assert!(output.contains("monitored processes"));
+    assert!(output.contains("PID"));
+}

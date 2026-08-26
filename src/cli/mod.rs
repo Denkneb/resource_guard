@@ -1,4 +1,11 @@
-use std::{error::Error, fmt, process::ExitCode};
+use std::{
+    error::Error,
+    fmt::{self, Write as _},
+    io::{self, Write as _},
+    process::ExitCode,
+    thread,
+    time::Duration,
+};
 
 use clap::{Parser, Subcommand};
 
@@ -8,7 +15,7 @@ use crate::{
         TomlConfigRepository, current_user_id,
     },
     application::{PortError, ProcessSource, StopAndWait, StopError, StopOutcome},
-    runtime::{self, RuntimeError},
+    runtime::{self, RuntimeError, TopResponse},
 };
 
 #[derive(Debug, Parser)]
@@ -70,6 +77,7 @@ pub enum CliError {
     StillRunning { pid: u32, grace_period_seconds: u64 },
     KillNotImplemented,
     Runtime(RuntimeError),
+    Output(io::Error),
     NotImplemented(&'static str),
 }
 
@@ -92,6 +100,7 @@ impl fmt::Display for CliError {
                 "SIGKILL is not implemented yet; no signal was sent"
             ),
             Self::Runtime(error) => error.fmt(formatter),
+            Self::Output(error) => write!(formatter, "cannot write command output: {error}"),
             Self::NotImplemented(command) => {
                 write!(formatter, "command '{command}' is not implemented yet")
             }
@@ -163,11 +172,85 @@ pub fn execute(cli: Cli) -> Result<(), CliError> {
             }
             Ok(())
         }
-        Command::Top { watch } => {
-            let _ = watch;
-            Err(CliError::NotImplemented("top"))
-        }
+        Command::Top { watch } => execute_top(watch),
         Command::Stop { pid, kill, yes } => execute_stop(pid, kill, yes),
+    }
+}
+
+fn execute_top(watch: bool) -> Result<(), CliError> {
+    loop {
+        let top = runtime::query_top()?;
+        let mut stdout = io::stdout().lock();
+        if watch {
+            write!(stdout, "\x1b[2J\x1b[H").map_err(CliError::Output)?;
+        }
+        write!(stdout, "{}", render_top(&top)).map_err(CliError::Output)?;
+        stdout.flush().map_err(CliError::Output)?;
+        drop(stdout);
+
+        if !watch {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_secs(2));
+    }
+}
+
+fn render_top(top: &TopResponse) -> String {
+    let mut output = format!(
+        "sample: {}s ago; {} monitored processes\n",
+        top.sample_age_seconds,
+        top.processes.len()
+    );
+    output.push_str("PID        CPU      RAM       AGE LIMIT NAME\n");
+    for process in &top.processes {
+        let limit = if process.exceeds_limit { "yes" } else { "-" };
+        let _ = writeln!(
+            output,
+            "{:<7} {:>6.1}% {:>8} {:>9} {:>5} {}",
+            process.pid,
+            process.cpu_percent,
+            format_bytes(process.resident_memory_bytes),
+            format_duration(process.running_for_seconds),
+            limit,
+            process.name,
+        );
+    }
+    output
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const KIB: u64 = 1_024;
+    const MIB: u64 = KIB * 1_024;
+    const GIB: u64 = MIB * 1_024;
+    if bytes >= GIB {
+        format_unit(bytes, GIB, "GiB")
+    } else if bytes >= MIB {
+        format_unit(bytes, MIB, "MiB")
+    } else if bytes >= KIB {
+        format_unit(bytes, KIB, "KiB")
+    } else {
+        format!("{bytes}B")
+    }
+}
+
+fn format_unit(bytes: u64, unit: u64, suffix: &str) -> String {
+    let tenths = (u128::from(bytes) * 10 + u128::from(unit / 2)) / u128::from(unit);
+    format!("{}.{:01}{suffix}", tenths / 10, tenths % 10)
+}
+
+fn format_duration(seconds: u64) -> String {
+    let days = seconds / 86_400;
+    let hours = (seconds % 86_400) / 3_600;
+    let minutes = (seconds % 3_600) / 60;
+    let seconds = seconds % 60;
+    if days > 0 {
+        format!("{days}d{hours:02}h")
+    } else if hours > 0 {
+        format!("{hours}h{minutes:02}m")
+    } else if minutes > 0 {
+        format!("{minutes}m{seconds:02}s")
+    } else {
+        format!("{seconds}s")
     }
 }
 
@@ -245,7 +328,8 @@ fn execute_config(command: Option<&ConfigCommand>) -> Result<(), CliError> {
 mod tests {
     use clap::Parser;
 
-    use super::{Cli, Command, ConfigCommand};
+    use super::{Cli, Command, ConfigCommand, format_bytes, format_duration, render_top};
+    use crate::runtime::{TopProcess, TopResponse};
 
     #[test]
     fn parses_config_without_a_nested_command() {
@@ -283,5 +367,40 @@ mod tests {
                 yes: false
             }
         ));
+    }
+
+    #[test]
+    fn parses_top_watch_mode() {
+        let cli = Cli::try_parse_from(["resource-guard", "top", "--watch"]).unwrap();
+
+        assert!(matches!(cli.command, Command::Top { watch: true }));
+    }
+
+    #[test]
+    fn formats_resource_values_for_top() {
+        assert_eq!(format_bytes(1_572_864), "1.5MiB");
+        assert_eq!(format_duration(3_661), "1h01m");
+    }
+
+    #[test]
+    fn renders_top_rows_and_limit_state() {
+        let output = render_top(&TopResponse {
+            sample_age_seconds: 2,
+            processes: vec![TopProcess {
+                pid: 42,
+                name: "worker".to_owned(),
+                cpu_percent: 75.5,
+                resident_memory_bytes: 1_572_864,
+                running_for_seconds: 61,
+                exceeds_limit: true,
+            }],
+        });
+
+        assert!(output.contains("sample: 2s ago"));
+        assert!(output.contains("42"));
+        assert!(output.contains("75.5%"));
+        assert!(output.contains("1.5MiB"));
+        assert!(output.contains("1m01s"));
+        assert!(output.contains("yes worker"));
     }
 }

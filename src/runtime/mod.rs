@@ -5,8 +5,8 @@ mod state;
 
 use std::{error::Error, fmt, io};
 
-pub use daemon::{query_status, run_daemon};
-pub use protocol::StatusResponse;
+pub use daemon::{query_status, query_top, run_daemon};
+pub use protocol::{StatusResponse, TopProcess, TopResponse};
 
 #[derive(Debug)]
 pub enum RuntimeError {

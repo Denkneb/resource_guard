@@ -17,11 +17,17 @@ pub struct MonitorEvent {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct MonitoredProcess {
+    pub observed: super::ObservedProcess,
+    pub breach: ResourceBreach,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct MonitorReport {
     pub system: SystemResources,
     pub observed_processes: usize,
     pub monitored_processes: usize,
-    pub processes: Vec<super::ObservedProcess>,
+    pub processes: Vec<MonitoredProcess>,
     pub events: Vec<MonitorEvent>,
 }
 
@@ -109,7 +115,7 @@ where
                     exceeded_for: elapsed,
                 });
             }
-            processes.push(observed);
+            processes.push(MonitoredProcess { observed, breach });
         }
 
         for stale in self.tracked_identities.difference(&active_identities) {
@@ -185,6 +191,7 @@ mod tests {
                 cpu_percent: 90.0,
                 resident_memory_bytes: 2_048,
                 virtual_memory_bytes: 4_096,
+                running_for: Duration::from_secs(30),
                 observed_at: Duration::ZERO,
             },
         }
