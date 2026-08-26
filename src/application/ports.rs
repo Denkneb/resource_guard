@@ -79,3 +79,8 @@ pub trait TerminationPort {
 pub trait MonotonicClock {
     fn now(&self) -> Duration;
 }
+
+/// Outbound port for delaying application workflows without binding them to a runtime.
+pub trait Sleeper {
+    fn sleep(&self, duration: Duration);
+}

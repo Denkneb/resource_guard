@@ -1,8 +1,10 @@
-use std::{error::Error, fmt};
+use std::{error::Error, fmt, time::Duration};
 
 use crate::domain::{ProcessDisposition, ProcessIdentity, ProtectionPolicy};
 
-use super::{PortError, ProcessSource, TerminationPort};
+use super::{MonotonicClock, PortError, ProcessSource, Sleeper, TerminationPort};
+
+const WAIT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum StopError {
@@ -47,11 +49,90 @@ impl fmt::Display for StopError {
 
 impl Error for StopError {}
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StopOutcome {
+    Exited,
+    StillRunning,
+}
+
 pub struct StopProcess<'a, S, T> {
     source: &'a mut S,
     terminator: &'a mut T,
     current_uid: u32,
     protection: &'a ProtectionPolicy,
+}
+
+pub struct StopAndWait<'a, S, T, C, D> {
+    source: &'a mut S,
+    terminator: &'a mut T,
+    clock: &'a C,
+    sleeper: &'a D,
+    current_uid: u32,
+    protection: &'a ProtectionPolicy,
+}
+
+impl<'a, S, T, C, D> StopAndWait<'a, S, T, C, D>
+where
+    S: ProcessSource,
+    T: TerminationPort,
+    C: MonotonicClock,
+    D: Sleeper,
+{
+    pub fn new(
+        source: &'a mut S,
+        terminator: &'a mut T,
+        clock: &'a C,
+        sleeper: &'a D,
+        current_uid: u32,
+        protection: &'a ProtectionPolicy,
+    ) -> Self {
+        Self {
+            source,
+            terminator,
+            clock,
+            sleeper,
+            current_uid,
+            protection,
+        }
+    }
+
+    /// Sends `SIGTERM` after revalidation and waits for the exact process to exit.
+    ///
+    /// # Errors
+    ///
+    /// Returns process inspection, protection, ownership, identity, or signalling errors.
+    pub fn execute(
+        &mut self,
+        expected: ProcessIdentity,
+        grace_period: Duration,
+    ) -> Result<StopOutcome, StopError> {
+        StopProcess::new(
+            self.source,
+            self.terminator,
+            self.current_uid,
+            self.protection,
+        )
+        .execute(expected)?;
+
+        let started_waiting_at = self.clock.now();
+        loop {
+            let process = self
+                .source
+                .find(expected.pid())
+                .map_err(StopError::Inspection)?;
+            if process.is_none_or(|process| process.identity() != expected) {
+                return Ok(StopOutcome::Exited);
+            }
+
+            let elapsed = self.clock.now().saturating_sub(started_waiting_at);
+            if elapsed >= grace_period {
+                return Ok(StopOutcome::StillRunning);
+            }
+
+            self.sleeper
+                .sleep(WAIT_POLL_INTERVAL.min(grace_period.saturating_sub(elapsed)));
+        }
+    }
 }
 
 impl<'a, S, T> StopProcess<'a, S, T>
@@ -117,11 +198,13 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::{cell::Cell, collections::VecDeque, path::PathBuf, rc::Rc, time::Duration};
 
-    use super::{StopError, StopProcess};
+    use super::{StopAndWait, StopError, StopOutcome, StopProcess};
     use crate::{
-        application::{PortError, ProcessSource, ResourceSnapshot, TerminationPort},
+        application::{
+            MonotonicClock, PortError, ProcessSource, ResourceSnapshot, Sleeper, TerminationPort,
+        },
         domain::{ProcessDescriptor, ProcessIdentity, ProtectionPolicy},
     };
 
@@ -251,5 +334,89 @@ mod tests {
 
         assert_eq!(result, Err(StopError::Protected { pid: 42 }));
         assert!(terminator.terminated.is_empty());
+    }
+
+    struct SequenceSource {
+        responses: VecDeque<Option<ProcessDescriptor>>,
+        fallback: Option<ProcessDescriptor>,
+    }
+
+    impl ProcessSource for SequenceSource {
+        fn snapshot(&mut self) -> Result<ResourceSnapshot, PortError> {
+            unreachable!("snapshot is not used by the stop use case")
+        }
+
+        fn find(&mut self, _pid: u32) -> Result<Option<ProcessDescriptor>, PortError> {
+            Ok(self
+                .responses
+                .pop_front()
+                .unwrap_or_else(|| self.fallback.clone()))
+        }
+    }
+
+    #[derive(Clone)]
+    struct FakeTime(Rc<Cell<Duration>>);
+
+    impl MonotonicClock for FakeTime {
+        fn now(&self) -> Duration {
+            self.0.get()
+        }
+    }
+
+    impl Sleeper for FakeTime {
+        fn sleep(&self, duration: Duration) {
+            self.0.set(self.0.get().saturating_add(duration));
+        }
+    }
+
+    #[test]
+    fn stop_and_wait_reports_an_exited_process() {
+        let identity = ProcessIdentity::new(42, CURRENT_UID, 100);
+        let process = descriptor(identity, "worker");
+        let mut source = SequenceSource {
+            responses: VecDeque::from([Some(process), None]),
+            fallback: None,
+        };
+        let mut terminator = FakeTerminator::default();
+        let time = FakeTime(Rc::new(Cell::new(Duration::ZERO)));
+
+        let outcome = StopAndWait::new(
+            &mut source,
+            &mut terminator,
+            &time,
+            &time,
+            CURRENT_UID,
+            &ProtectionPolicy::default(),
+        )
+        .execute(identity, Duration::from_secs(1));
+
+        assert_eq!(outcome, Ok(StopOutcome::Exited));
+        assert_eq!(terminator.terminated, vec![identity]);
+    }
+
+    #[test]
+    fn stop_and_wait_reports_a_process_surviving_the_grace_period() {
+        let identity = ProcessIdentity::new(42, CURRENT_UID, 100);
+        let process = descriptor(identity, "worker");
+        let mut source = SequenceSource {
+            responses: VecDeque::new(),
+            fallback: Some(process),
+        };
+        let mut terminator = FakeTerminator::default();
+        let time = FakeTime(Rc::new(Cell::new(Duration::ZERO)));
+
+        let outcome = StopAndWait::new(
+            &mut source,
+            &mut terminator,
+            &time,
+            &time,
+            CURRENT_UID,
+            &ProtectionPolicy::default(),
+        )
+        .execute(identity, Duration::from_millis(250));
+
+        assert_eq!(outcome, Ok(StopOutcome::StillRunning));
+        assert_eq!(time.now(), Duration::from_millis(250));
+        assert_eq!(terminator.terminated, vec![identity]);
     }
 }

@@ -8,6 +8,7 @@ pub use config::{
 };
 pub use monitor::{MonitorEvent, MonitorReport, MonitorService};
 pub use ports::{
-    MonotonicClock, ObservedProcess, PortError, ProcessSource, ResourceSnapshot, TerminationPort,
+    MonotonicClock, ObservedProcess, PortError, ProcessSource, ResourceSnapshot, Sleeper,
+    TerminationPort,
 };
-pub use process_control::{StopError, StopProcess};
+pub use process_control::{StopAndWait, StopError, StopOutcome, StopProcess};
