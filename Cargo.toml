@@ -6,6 +6,7 @@ description = "A lightweight Linux resource monitor and process guard"
 license = "MIT"
 
 [dependencies]
+sysinfo = { version = "0.38.4", default-features = false, features = ["system"] }
 
 [lints.rust]
 unsafe_code = "forbid"
@@ -13,4 +14,3 @@ unsafe_code = "forbid"
 [lints.clippy]
 all = "warn"
 pedantic = "warn"
-
