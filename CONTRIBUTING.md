@@ -42,4 +42,6 @@ pre-commit run --all-files --hook-stage pre-commit
 pre-commit run --all-files --hook-stage pre-push
 ```
 
+GitHub Actions runs formatting, Clippy, the complete test suite, and a locked release build for every pull request and every push to `main`. All CI checks must pass before merging.
+
 `cargo-audit` and `cargo-deny` are not part of the local hooks. They require separate installation and policy configuration and can be added to CI independently.

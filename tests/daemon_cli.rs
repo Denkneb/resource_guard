@@ -73,6 +73,18 @@ fn wait_until_ready(directory: &TempDir) {
     panic!("daemon did not become ready");
 }
 
+fn wait_for_output(path: &std::path::Path, expected: &str) -> String {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        let output = fs::read_to_string(path).unwrap();
+        if output.contains(expected) {
+            return output;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    panic!("command output did not contain {expected:?}");
+}
+
 #[test]
 fn status_reports_running_daemon_and_secure_socket_permissions() {
     let directory = tempfile::tempdir().unwrap();
@@ -185,24 +197,23 @@ fn top_fails_when_daemon_is_absent() {
 }
 
 #[test]
-fn top_watch_renders_and_refreshes_the_terminal_view() {
+fn top_watch_renders_the_terminal_view() {
     let directory = tempfile::tempdir().unwrap();
     let _daemon = start_daemon(&directory);
     let output_path = directory.path().join("top-watch.txt");
     let output_file = fs::File::create(&output_path).unwrap();
-    let mut top = isolated_command(&directory)
+    let top = isolated_command(&directory)
         .args(["top", "--watch"])
         .stdout(Stdio::from(output_file))
         .stderr(Stdio::null())
         .spawn()
         .unwrap();
+    let mut top = DaemonGuard { child: top };
 
-    thread::sleep(Duration::from_millis(150));
-    top.kill().unwrap();
-    top.wait().unwrap();
+    let output = wait_for_output(&output_path, "monitored processes");
+    top.child.kill().unwrap();
+    top.child.wait().unwrap();
 
-    let output = fs::read_to_string(output_path).unwrap();
     assert!(output.starts_with("\x1b[2J\x1b[H"));
-    assert!(output.contains("monitored processes"));
     assert!(output.contains("PID"));
 }

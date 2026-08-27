@@ -1,5 +1,7 @@
 # Resource Guard
 
+[![CI](https://github.com/Denkneb/resource_guard/actions/workflows/ci.yml/badge.svg)](https://github.com/Denkneb/resource_guard/actions/workflows/ci.yml)
+
 Resource Guard is a lightweight Linux daemon that watches processes owned by the current user and reports sustained CPU or memory limit violations. It provides desktop notifications with safe actions and a CLI for status, process inspection, configuration, and graceful termination.
 
 The project is Linux-only. It does not require root privileges and is distributed as one Rust binary.
