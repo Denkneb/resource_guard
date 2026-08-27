@@ -4,6 +4,26 @@ version = "0.1.0"
 edition = "2024"
 description = "A lightweight Linux resource monitor and process guard"
 license = "MIT"
+repository = "https://github.com/Denkneb/resource_guard"
+homepage = "https://github.com/Denkneb/resource_guard"
+readme = "README.md"
+keywords = ["linux", "monitoring", "process", "resources", "daemon"]
+categories = ["command-line-utilities", "os::linux-apis"]
+include = [
+    ".github/workflows/release.yml",
+    "src/**",
+    "tests/**",
+    "packaging/**",
+    "scripts/package-release.sh",
+    "Cargo.toml",
+    "Cargo.lock",
+    "README.md",
+    "CHANGELOG.md",
+    "CONTRIBUTING.md",
+    "SECURITY.md",
+    "LICENSE",
+    "config.example.toml",
+]
 
 [dependencies]
 clap = { version = "4.6.4", features = ["derive"] }

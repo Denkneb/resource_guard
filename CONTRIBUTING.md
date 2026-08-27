@@ -60,3 +60,22 @@ These network-dependent checks are deliberately kept out of the local Git hooks.
 Dependabot checks Cargo dependencies and GitHub Actions every Monday. Minor and patch updates are grouped per ecosystem, while major updates remain separate pull requests. Dependabot does not merge changes automatically.
 
 Review grouped updates as one change set, inspect upstream release notes, and confirm both CI and dependency-policy checks before merging. Major updates require an explicit compatibility review even when all automated checks pass.
+
+## Release process
+
+Releases currently publish an `x86_64-unknown-linux-gnu` archive. Before creating a release:
+
+1. Set the package version in `Cargo.toml` and update `Cargo.lock`.
+2. Move the relevant entries from `Unreleased` into a dated section in `CHANGELOG.md`.
+3. Run all local checks and dependency-policy checks.
+4. Build the archive twice in separate empty directories and compare the resulting SHA-256 checksums:
+
+   ```sh
+   ./scripts/package-release.sh 0.1.0 /tmp/resource-guard-release-1
+   ./scripts/package-release.sh 0.1.0 /tmp/resource-guard-release-2
+   ```
+
+5. Commit the release changes and ensure the commit passes CI.
+6. Create and push an annotated tag matching the Cargo version, such as `v0.1.0`.
+
+The tag-triggered release workflow reruns the full test suite, rejects a tag whose version differs from `Cargo.toml`, verifies the generated checksum, and publishes both files as a GitHub Release. The packaging script never creates commits, tags, or releases itself and refuses to overwrite an existing artifact.

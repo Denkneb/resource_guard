@@ -1,9 +1,13 @@
 #![cfg(target_os = "linux")]
 
-use std::process::Command;
+use std::{fs, process::Command};
+
+use tempfile::TempDir;
 
 const UNIT: &str = include_str!("../packaging/resource-guard.service");
 const README: &str = include_str!("../README.md");
+const RELEASE_WORKFLOW: &str = include_str!("../.github/workflows/release.yml");
+const PACKAGE_SCRIPT: &str = include_str!("../scripts/package-release.sh");
 
 #[test]
 fn user_service_has_the_expected_lifecycle_and_runtime_contract() {
@@ -46,6 +50,118 @@ fn example_configuration_is_accepted_by_the_binary() {
     assert!(
         output.status.success(),
         "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn release_workflow_is_tag_only_and_uses_the_packaging_script() {
+    assert!(RELEASE_WORKFLOW.contains("tags:"));
+    assert!(RELEASE_WORKFLOW.contains("\"v*.*.*\""));
+    assert!(!RELEASE_WORKFLOW.contains("workflow_dispatch:"));
+    assert!(RELEASE_WORKFLOW.contains("./scripts/package-release.sh"));
+    assert!(RELEASE_WORKFLOW.contains("sha256sum --check"));
+    assert!(RELEASE_WORKFLOW.contains("gh release create"));
+    assert!(RELEASE_WORKFLOW.contains("--verify-tag"));
+}
+
+#[test]
+fn release_script_rejects_a_version_that_does_not_match_cargo() {
+    let output = Command::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/scripts/package-release.sh"
+    ))
+    .arg("999.0.0")
+    .output()
+    .unwrap();
+
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("does not match Cargo package version")
+    );
+}
+
+#[test]
+fn release_archives_are_reproducible_and_contain_the_installation_payload() {
+    let first_output = TempDir::new().unwrap();
+    let second_output = TempDir::new().unwrap();
+
+    package_test_release(first_output.path());
+    package_test_release(second_output.path());
+
+    let archive_name = format!(
+        "resource-guard-{}-x86_64-unknown-linux-gnu.tar.gz",
+        env!("CARGO_PKG_VERSION")
+    );
+    let first_archive = first_output.path().join(&archive_name);
+    let second_archive = second_output.path().join(&archive_name);
+    assert_eq!(
+        fs::read(&first_archive).unwrap(),
+        fs::read(&second_archive).unwrap()
+    );
+
+    let checksum = Command::new("sha256sum")
+        .args(["--check", &format!("{archive_name}.sha256")])
+        .current_dir(first_output.path())
+        .output()
+        .unwrap();
+    assert!(
+        checksum.status.success(),
+        "{}",
+        String::from_utf8_lossy(&checksum.stderr)
+    );
+
+    let listing = Command::new("tar")
+        .args(["-tzf", first_archive.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(listing.status.success());
+    let listing = String::from_utf8(listing.stdout).unwrap();
+    let archive_root = format!(
+        "resource-guard-{}-x86_64-unknown-linux-gnu",
+        env!("CARGO_PKG_VERSION")
+    );
+    for path in [
+        "bin/resource-guard",
+        "config/config.example.toml",
+        "systemd/resource-guard.service",
+        "README.md",
+        "CHANGELOG.md",
+        "LICENSE",
+    ] {
+        assert!(
+            listing
+                .lines()
+                .any(|line| line == format!("{archive_root}/{path}"))
+        );
+    }
+
+    assert!(PACKAGE_SCRIPT.contains("--sort=name"));
+    assert!(PACKAGE_SCRIPT.contains("gzip -n"));
+    assert!(PACKAGE_SCRIPT.contains("SOURCE_DATE_EPOCH"));
+}
+
+fn package_test_release(output_directory: &std::path::Path) {
+    let output = Command::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/scripts/package-release.sh"
+    ))
+    .args([
+        env!("CARGO_PKG_VERSION"),
+        output_directory.to_str().unwrap(),
+    ])
+    .env(
+        "RESOURCE_GUARD_RELEASE_BINARY",
+        env!("CARGO_BIN_EXE_resource-guard"),
+    )
+    .env("SOURCE_DATE_EPOCH", "1700000000")
+    .output()
+    .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
 }

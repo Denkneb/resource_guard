@@ -38,7 +38,27 @@ cargo test --locked --all-targets --all-features
 
 The measured release daemon uses 6.94 MiB peak RSS and averages 0.762% of one logical CPU core in the current 60-second baseline. See [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md) for the environment, methodology, limitations, and reproduction script.
 
-## Install for the current user
+## Install a published release
+
+Release archives currently target 64-bit glibc-based Linux (`x86_64-unknown-linux-gnu`). Download the archive and its `.sha256` file from the corresponding GitHub release, then verify and extract it:
+
+```console
+sha256sum --check resource-guard-0.1.0-x86_64-unknown-linux-gnu.tar.gz.sha256
+tar -xzf resource-guard-0.1.0-x86_64-unknown-linux-gnu.tar.gz
+cd resource-guard-0.1.0-x86_64-unknown-linux-gnu
+```
+
+Install the extracted binary and user service without `sudo`:
+
+```console
+install -Dm755 bin/resource-guard "$HOME/.local/bin/resource-guard"
+install -Dm644 systemd/resource-guard.service \
+  "$HOME/.config/systemd/user/resource-guard.service"
+systemctl --user daemon-reload
+systemctl --user enable --now resource-guard.service
+```
+
+## Install a source build for the current user
 
 Install the binary and user unit without `sudo`:
 
