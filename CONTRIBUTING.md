@@ -44,4 +44,13 @@ pre-commit run --all-files --hook-stage pre-push
 
 GitHub Actions runs formatting, Clippy, the complete test suite, and a locked release build for every pull request and every push to `main`. All CI checks must pass before merging.
 
-`cargo-audit` and `cargo-deny` are not part of the local hooks. They require separate installation and policy configuration and can be added to CI independently.
+Dependency security and policy checks run when Cargo dependency files change and on a weekly schedule. To run them locally, install the tools and use the repository policy:
+
+```sh
+cargo install --locked cargo-audit --version 0.22.2
+cargo install --locked cargo-deny --version 0.20.2
+cargo audit
+cargo deny --all-features check advisories bans licenses sources
+```
+
+These network-dependent checks are deliberately kept out of the local Git hooks. Do not add advisory or license exceptions without documenting a concrete reason and reviewing the impact.

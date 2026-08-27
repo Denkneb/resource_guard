@@ -144,6 +144,10 @@ Remove `~/.local/bin/resource-guard` and the configuration separately if they ar
 
 Development setup and repository hooks are documented in [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
+## Security
+
+Please report vulnerabilities privately as described in [`SECURITY.md`](SECURITY.md). Do not include vulnerability details in public issues or pull requests.
+
 ## License
 
 Resource Guard is licensed under the [MIT License](LICENSE).
