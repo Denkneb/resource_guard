@@ -34,6 +34,8 @@ cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo test --locked --all-targets --all-features
 ```
 
+The measured release daemon uses 6.94 MiB peak RSS and averages 0.762% of one logical CPU core in the current 60-second baseline. See [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md) for the environment, methodology, limitations, and reproduction script.
+
 ## Install for the current user
 
 Install the binary and user unit without `sudo`:
