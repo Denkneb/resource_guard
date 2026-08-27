@@ -55,11 +55,7 @@ impl ProtectionPolicy {
 
     #[must_use]
     pub fn disposition(&self, process: &ProcessDescriptor) -> ProcessDisposition {
-        if self.protected_names.contains(process.name())
-            || process
-                .executable()
-                .is_some_and(|path| self.protected_executables.contains(path))
-        {
+        if self.is_protected(process) {
             ProcessDisposition::Protect
         } else if self.ignored_names.contains(process.name())
             || process
@@ -70,6 +66,14 @@ impl ProtectionPolicy {
         } else {
             ProcessDisposition::Monitor
         }
+    }
+
+    #[must_use]
+    pub fn is_protected(&self, process: &ProcessDescriptor) -> bool {
+        self.protected_names.contains(process.name())
+            || process
+                .executable()
+                .is_some_and(|path| self.protected_executables.contains(path))
     }
 
     #[must_use]

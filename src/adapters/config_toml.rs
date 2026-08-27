@@ -9,9 +9,10 @@ use std::{
 use serde::{Deserialize, Serialize};
 
 use crate::application::{
-    ConfigValidationError, MonitorSettings, NotificationSettings, ProcessSettings, Settings,
-    TerminationSettings,
+    ConfigValidationError, EmergencySettings, MemoryPressureSettings, MonitorSettings,
+    NotificationSettings, ProcessSettings, Settings, TerminationSettings,
 };
+use crate::domain::EmergencyAction;
 
 use super::{ConfigPathError, resolve_config_path};
 
@@ -250,9 +251,60 @@ impl Error for ConfigError {}
 #[serde(default, deny_unknown_fields)]
 struct ConfigDocument {
     monitor: MonitorDocument,
+    memory_pressure: MemoryPressureDocument,
+    emergency: EmergencyDocument,
     termination: TerminationDocument,
     processes: ProcessDocument,
     notifications: NotificationDocument,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+struct MemoryPressureDocument {
+    enabled: bool,
+    warning_available_percent: f32,
+    critical_available_percent: f32,
+    emergency_available_mib: u64,
+    critical_swap_used_percent: f32,
+    critical_psi_full_avg10: f32,
+    critical_samples: u32,
+    warning_poll_interval_ms: u64,
+    critical_poll_interval_ms: u64,
+    recovery_available_percent: f32,
+}
+
+impl Default for MemoryPressureDocument {
+    fn default() -> Self {
+        Self::from(&MemoryPressureSettings::default())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum EmergencyActionDocument {
+    #[default]
+    NotifyOnly,
+    TerminateAllowlisted,
+    TerminateLargestUnprotected,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+struct EmergencyDocument {
+    action: EmergencyActionDocument,
+    allow_sigkill: bool,
+    term_grace_seconds: u64,
+    action_cooldown_seconds: u64,
+    allowed_names: Vec<String>,
+    allowed_executables: Vec<PathBuf>,
+    exempt_names: Vec<String>,
+    exempt_executables: Vec<PathBuf>,
+}
+
+impl Default for EmergencyDocument {
+    fn default() -> Self {
+        Self::from(&EmergencySettings::default())
+    }
 }
 
 impl Default for ConfigDocument {
@@ -326,6 +378,35 @@ impl From<ConfigDocument> for Settings {
                     .max_memory_mib
                     .saturating_mul(BYTES_PER_MIB),
             },
+            memory_pressure: MemoryPressureSettings {
+                enabled: document.memory_pressure.enabled,
+                warning_available_percent: document.memory_pressure.warning_available_percent,
+                critical_available_percent: document.memory_pressure.critical_available_percent,
+                emergency_available_bytes: document
+                    .memory_pressure
+                    .emergency_available_mib
+                    .saturating_mul(BYTES_PER_MIB),
+                critical_swap_used_percent: document.memory_pressure.critical_swap_used_percent,
+                critical_psi_full_avg10: document.memory_pressure.critical_psi_full_avg10,
+                critical_samples: document.memory_pressure.critical_samples,
+                warning_poll_interval: Duration::from_millis(
+                    document.memory_pressure.warning_poll_interval_ms,
+                ),
+                critical_poll_interval: Duration::from_millis(
+                    document.memory_pressure.critical_poll_interval_ms,
+                ),
+                recovery_available_percent: document.memory_pressure.recovery_available_percent,
+            },
+            emergency: EmergencySettings {
+                action: EmergencyAction::from(document.emergency.action),
+                allow_sigkill: document.emergency.allow_sigkill,
+                term_grace_period: Duration::from_secs(document.emergency.term_grace_seconds),
+                action_cooldown: Duration::from_secs(document.emergency.action_cooldown_seconds),
+                allowed_names: document.emergency.allowed_names,
+                allowed_executables: document.emergency.allowed_executables,
+                exempt_names: document.emergency.exempt_names,
+                exempt_executables: document.emergency.exempt_executables,
+            },
             termination: TerminationSettings {
                 grace_period: Duration::from_secs(document.termination.grace_period_seconds),
             },
@@ -347,11 +428,71 @@ impl From<&Settings> for ConfigDocument {
     fn from(settings: &Settings) -> Self {
         Self {
             monitor: MonitorDocument::from(&settings.monitor),
+            memory_pressure: MemoryPressureDocument::from(&settings.memory_pressure),
+            emergency: EmergencyDocument::from(&settings.emergency),
             termination: TerminationDocument::from(&settings.termination),
             processes: ProcessDocument::from(&settings.processes),
             notifications: NotificationDocument::from(&settings.notifications),
         }
     }
+}
+
+impl From<EmergencyActionDocument> for EmergencyAction {
+    fn from(action: EmergencyActionDocument) -> Self {
+        match action {
+            EmergencyActionDocument::NotifyOnly => Self::NotifyOnly,
+            EmergencyActionDocument::TerminateAllowlisted => Self::TerminateAllowlisted,
+            EmergencyActionDocument::TerminateLargestUnprotected => {
+                Self::TerminateLargestUnprotected
+            }
+        }
+    }
+}
+
+impl From<EmergencyAction> for EmergencyActionDocument {
+    fn from(action: EmergencyAction) -> Self {
+        match action {
+            EmergencyAction::NotifyOnly => Self::NotifyOnly,
+            EmergencyAction::TerminateAllowlisted => Self::TerminateAllowlisted,
+            EmergencyAction::TerminateLargestUnprotected => Self::TerminateLargestUnprotected,
+        }
+    }
+}
+
+impl From<&MemoryPressureSettings> for MemoryPressureDocument {
+    fn from(settings: &MemoryPressureSettings) -> Self {
+        Self {
+            enabled: settings.enabled,
+            warning_available_percent: settings.warning_available_percent,
+            critical_available_percent: settings.critical_available_percent,
+            emergency_available_mib: settings.emergency_available_bytes / BYTES_PER_MIB,
+            critical_swap_used_percent: settings.critical_swap_used_percent,
+            critical_psi_full_avg10: settings.critical_psi_full_avg10,
+            critical_samples: settings.critical_samples,
+            warning_poll_interval_ms: duration_milliseconds(settings.warning_poll_interval),
+            critical_poll_interval_ms: duration_milliseconds(settings.critical_poll_interval),
+            recovery_available_percent: settings.recovery_available_percent,
+        }
+    }
+}
+
+impl From<&EmergencySettings> for EmergencyDocument {
+    fn from(settings: &EmergencySettings) -> Self {
+        Self {
+            action: settings.action.into(),
+            allow_sigkill: settings.allow_sigkill,
+            term_grace_seconds: settings.term_grace_period.as_secs(),
+            action_cooldown_seconds: settings.action_cooldown.as_secs(),
+            allowed_names: settings.allowed_names.clone(),
+            allowed_executables: settings.allowed_executables.clone(),
+            exempt_names: settings.exempt_names.clone(),
+            exempt_executables: settings.exempt_executables.clone(),
+        }
+    }
+}
+
+fn duration_milliseconds(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
 impl From<&MonitorSettings> for MonitorDocument {
@@ -426,6 +567,19 @@ mod tests {
         assert_eq!(loaded.origin, ConfigOrigin::File);
         assert_eq!(loaded.settings.monitor.poll_interval.as_secs(), 7);
         assert_eq!(loaded.settings.monitor.consecutive_samples, 3);
+        assert!(loaded.settings.memory_pressure.enabled);
+        assert_eq!(
+            loaded
+                .settings
+                .memory_pressure
+                .critical_poll_interval
+                .as_millis(),
+            500
+        );
+        assert_eq!(
+            loaded.settings.emergency.action,
+            crate::domain::EmergencyAction::NotifyOnly
+        );
     }
 
     #[test]
@@ -443,6 +597,40 @@ mod tests {
         let directory = tempdir().unwrap();
         let path = directory.path().join("config.toml");
         fs::write(&path, "[monitor]\npoll_interval_seconds = 0\n").unwrap();
+        let repository = TomlConfigRepository::new(path);
+
+        assert!(matches!(repository.load(), Err(ConfigError::Validation(_))));
+    }
+
+    #[test]
+    fn loads_explicit_emergency_policy() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        fs::write(
+            &path,
+            "[emergency]\naction = \"terminate_allowlisted\"\nallowed_names = [\"worker\"]\n",
+        )
+        .unwrap();
+        let repository = TomlConfigRepository::new(path);
+
+        let settings = repository.load().unwrap().settings;
+
+        assert_eq!(
+            settings.emergency.action,
+            crate::domain::EmergencyAction::TerminateAllowlisted
+        );
+        assert_eq!(settings.emergency.allowed_names, vec!["worker"]);
+    }
+
+    #[test]
+    fn rejects_invalid_pressure_threshold_ordering() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        fs::write(
+            &path,
+            "[memory_pressure]\nwarning_available_percent = 5\ncritical_available_percent = 8\n",
+        )
+        .unwrap();
         let repository = TomlConfigRepository::new(path);
 
         assert!(matches!(repository.load(), Err(ConfigError::Validation(_))));

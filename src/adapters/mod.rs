@@ -1,5 +1,7 @@
 mod config_toml;
 #[cfg(target_os = "linux")]
+mod memory_pressure_procfs;
+#[cfg(target_os = "linux")]
 mod notifications_zbus;
 mod paths;
 #[cfg(target_os = "linux")]
@@ -12,6 +14,8 @@ mod system_clock;
 mod thread_sleeper;
 
 pub use config_toml::{ConfigError, ConfigOrigin, LoadedSettings, TomlConfigRepository};
+#[cfg(target_os = "linux")]
+pub use memory_pressure_procfs::ProcMemoryPressureSource;
 #[cfg(target_os = "linux")]
 pub use notifications_zbus::ZbusNotificationSink;
 pub use paths::{ConfigPathError, resolve_config_path};

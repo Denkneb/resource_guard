@@ -1,6 +1,7 @@
 use std::time::Instant;
 
 use crate::application::MonitorReport;
+use crate::domain::{MemoryPressureEvaluation, MemoryPressureLevel};
 
 use super::{
     StatusResponse,
@@ -15,6 +16,10 @@ pub(crate) struct DaemonState {
     available_memory_bytes: u64,
     total_swap_bytes: u64,
     used_swap_bytes: u64,
+    memory_pressure_level: MemoryPressureLevel,
+    memory_psi_some_avg10: f32,
+    memory_psi_full_avg10: f32,
+    last_emergency_action: Option<String>,
     observed_processes: usize,
     monitored_processes: usize,
     active_events: usize,
@@ -32,6 +37,10 @@ impl DaemonState {
             available_memory_bytes: 0,
             total_swap_bytes: 0,
             used_swap_bytes: 0,
+            memory_pressure_level: MemoryPressureLevel::Normal,
+            memory_psi_some_avg10: 0.0,
+            memory_psi_full_avg10: 0.0,
+            last_emergency_action: None,
             observed_processes: 0,
             monitored_processes: 0,
             active_events: 0,
@@ -39,6 +48,22 @@ impl DaemonState {
             last_error: None,
             notification_error: None,
         }
+    }
+
+    pub(crate) fn record_pressure(&mut self, evaluation: MemoryPressureEvaluation) {
+        self.last_poll_at = Some(Instant::now());
+        self.total_memory_bytes = evaluation.sample.system.total_memory_bytes;
+        self.available_memory_bytes = evaluation.sample.system.available_memory_bytes;
+        self.total_swap_bytes = evaluation.sample.system.total_swap_bytes;
+        self.used_swap_bytes = evaluation.sample.system.used_swap_bytes;
+        self.memory_pressure_level = evaluation.current;
+        self.memory_psi_some_avg10 = evaluation.sample.psi.some_avg10;
+        self.memory_psi_full_avg10 = evaluation.sample.psi.full_avg10;
+        self.last_error = None;
+    }
+
+    pub(crate) fn record_emergency_action(&mut self, action: impl Into<String>) {
+        self.last_emergency_action = Some(action.into());
     }
 
     pub(crate) fn record_report(&mut self, report: &MonitorReport) {
@@ -82,6 +107,10 @@ impl DaemonState {
             available_memory_bytes: self.available_memory_bytes,
             total_swap_bytes: self.total_swap_bytes,
             used_swap_bytes: self.used_swap_bytes,
+            memory_pressure_level: pressure_level_name(self.memory_pressure_level).to_owned(),
+            memory_psi_some_avg10: self.memory_psi_some_avg10,
+            memory_psi_full_avg10: self.memory_psi_full_avg10,
+            last_emergency_action: self.last_emergency_action.clone(),
             observed_processes: self.observed_processes,
             monitored_processes: self.monitored_processes,
             active_events: self.active_events,
@@ -111,6 +140,15 @@ impl DaemonState {
             sample_age_seconds: self.last_poll_at.map_or(0, |at| at.elapsed().as_secs()),
             processes,
         }
+    }
+}
+
+const fn pressure_level_name(level: MemoryPressureLevel) -> &'static str {
+    match level {
+        MemoryPressureLevel::Normal => "normal",
+        MemoryPressureLevel::Warning => "warning",
+        MemoryPressureLevel::Critical => "critical",
+        MemoryPressureLevel::Recovery => "recovery",
     }
 }
 

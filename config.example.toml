@@ -6,6 +6,28 @@ cooldown_seconds = 600
 max_cpu_percent = 90.0
 max_memory_mib = 2048
 
+[memory_pressure]
+enabled = true
+warning_available_percent = 15.0
+critical_available_percent = 8.0
+emergency_available_mib = 512
+critical_swap_used_percent = 90.0
+critical_psi_full_avg10 = 5.0
+critical_samples = 2
+warning_poll_interval_ms = 1000
+critical_poll_interval_ms = 500
+recovery_available_percent = 20.0
+
+[emergency]
+action = "notify_only"
+allow_sigkill = false
+term_grace_seconds = 3
+action_cooldown_seconds = 30
+allowed_names = []
+allowed_executables = []
+exempt_names = ["resource-guard"]
+exempt_executables = []
+
 [termination]
 grace_period_seconds = 10
 

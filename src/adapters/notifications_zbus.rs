@@ -146,7 +146,8 @@ impl NotificationSink for ZbusNotificationSink {
         let timeout = self.timeout_milliseconds;
         async move {
             let proxy = notification_proxy(&connection).await?;
-            let actions = notification_actions(request.view, supports_actions);
+            let actions =
+                notification_actions(request.view, supports_actions && request.has_actions());
             let hints = notification_hints(supports_persistence);
             proxy
                 .call(

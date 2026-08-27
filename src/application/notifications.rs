@@ -2,10 +2,9 @@ use std::{
     collections::{HashMap, VecDeque},
     fmt::Write as _,
     future::Future,
-    time::Duration,
 };
 
-use crate::domain::{ProcessDescriptor, ProcessResources, ResourceBreach};
+use crate::domain::MemoryPressureEvaluation;
 
 use super::{MonitorEvent, PortError};
 
@@ -76,53 +75,26 @@ impl NotificationCloseReason {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct NotificationRequest {
-    pub process: ProcessDescriptor,
-    pub resources: ProcessResources,
-    pub breach: ResourceBreach,
-    pub exceeded_for: Duration,
+    summary: String,
+    body: String,
+    actions: bool,
     pub view: NotificationView,
 }
 
 impl NotificationRequest {
     #[must_use]
     pub fn from_event(event: &MonitorEvent) -> Self {
-        Self {
-            process: event.process.clone(),
-            resources: event.resources,
-            breach: event.breach,
-            exceeded_for: event.exceeded_for,
-            view: NotificationView::Summary,
-        }
+        Self::for_view(event, NotificationView::Summary)
     }
 
     #[must_use]
     pub fn details(event: &MonitorEvent) -> Self {
-        Self {
-            view: NotificationView::Details,
-            ..Self::from_event(event)
-        }
+        Self::for_view(event, NotificationView::Details)
     }
 
     #[must_use]
     pub fn for_view(event: &MonitorEvent, view: NotificationView) -> Self {
-        match view {
-            NotificationView::Summary => Self::from_event(event),
-            NotificationView::Details => Self::details(event),
-        }
-    }
-
-    #[must_use]
-    pub fn summary(&self) -> String {
-        format!(
-            "Resource limit exceeded: {} ({})",
-            self.process.name(),
-            self.process.identity().pid()
-        )
-    }
-
-    #[must_use]
-    pub fn body(&self) -> String {
-        let reason = match (self.breach.cpu, self.breach.memory) {
+        let reason = match (event.breach.cpu, event.breach.memory) {
             (true, true) => "CPU and RAM",
             (true, false) => "CPU",
             (false, true) => "RAM",
@@ -130,12 +102,12 @@ impl NotificationRequest {
         };
         let mut body = format!(
             "CPU: {:.1}%\nRAM: {} MiB\nExceeded for: {}s\nReason: {reason}",
-            self.resources.cpu_percent,
-            self.resources.resident_memory_bytes / 1_048_576,
-            self.exceeded_for.as_secs(),
+            event.resources.cpu_percent,
+            event.resources.resident_memory_bytes / 1_048_576,
+            event.exceeded_for.as_secs(),
         );
-        if self.view == NotificationView::Details {
-            let executable = self
+        if view == NotificationView::Details {
+            let executable = event
                 .process
                 .executable()
                 .map_or_else(|| "unknown".to_owned(), |path| path.display().to_string());
@@ -143,11 +115,57 @@ impl NotificationRequest {
             let _ = write!(
                 body,
                 "\nExecutable: {executable}\nVirtual memory: {} MiB\nRuntime: {}s",
-                self.resources.virtual_memory_bytes / 1_048_576,
-                self.resources.running_for.as_secs(),
+                event.resources.virtual_memory_bytes / 1_048_576,
+                event.resources.running_for.as_secs(),
             );
         }
-        body
+        Self {
+            summary: format!(
+                "Resource limit exceeded: {} ({})",
+                event.process.name(),
+                event.process.identity().pid()
+            ),
+            body,
+            actions: true,
+            view,
+        }
+    }
+
+    #[must_use]
+    pub fn for_pressure(evaluation: MemoryPressureEvaluation, outcome: Option<&str>) -> Self {
+        let sample = evaluation.sample;
+        let mut body = format!(
+            "Available RAM: {} MiB ({:.1}%)\nSwap used: {:.1}%\nPSI some/full avg10: {:.2}% / {:.2}%",
+            sample.system.available_memory_bytes / 1_048_576,
+            sample.available_percent(),
+            sample.swap_used_percent(),
+            sample.psi.some_avg10,
+            sample.psi.full_avg10,
+        );
+        if let Some(outcome) = outcome {
+            let _ = write!(body, "\nAction: {}", escape_markup(outcome));
+        }
+        Self {
+            summary: format!("System memory pressure: {:?}", evaluation.current),
+            body,
+            actions: false,
+            view: NotificationView::Summary,
+        }
+    }
+
+    #[must_use]
+    pub const fn has_actions(&self) -> bool {
+        self.actions
+    }
+
+    #[must_use]
+    pub fn summary(&self) -> String {
+        self.summary.clone()
+    }
+
+    #[must_use]
+    pub fn body(&self) -> String {
+        self.body.clone()
     }
 }
 
@@ -272,7 +290,10 @@ mod tests {
     };
     use crate::{
         application::{MonitorEvent, PortError},
-        domain::{ProcessDescriptor, ProcessIdentity, ProcessResources, ResourceBreach},
+        domain::{
+            MemoryPressureEvaluation, MemoryPressureLevel, MemoryPressureSample, MemoryPsi,
+            ProcessDescriptor, ProcessIdentity, ProcessResources, ResourceBreach, SystemResources,
+        },
     };
 
     fn event() -> MonitorEvent {
@@ -327,6 +348,33 @@ mod tests {
         let body = NotificationRequest::details(&event).body();
 
         assert!(body.contains("/tmp/&lt;worker&amp;helper&gt;"));
+    }
+
+    #[test]
+    fn builds_a_system_pressure_message_without_process_actions() {
+        let request = NotificationRequest::for_pressure(
+            MemoryPressureEvaluation {
+                previous: MemoryPressureLevel::Warning,
+                current: MemoryPressureLevel::Critical,
+                sample: MemoryPressureSample {
+                    system: SystemResources {
+                        total_memory_bytes: 16 * 1_024 * 1_024,
+                        available_memory_bytes: 1_024 * 1_024,
+                        total_swap_bytes: 4 * 1_024 * 1_024,
+                        used_swap_bytes: 3 * 1_024 * 1_024,
+                    },
+                    psi: MemoryPsi {
+                        some_avg10: 12.0,
+                        full_avg10: 5.0,
+                    },
+                },
+            },
+            Some("SIGTERM sent to worker (42)"),
+        );
+
+        assert!(request.summary().contains("Critical"));
+        assert!(request.body().contains("Action: SIGTERM sent"));
+        assert!(!request.has_actions());
     }
 
     #[test]

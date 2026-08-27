@@ -18,14 +18,18 @@ use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitEx
 
 use crate::{
     adapters::{
-        PidfdTerminationPort, SysinfoProcessSource, SystemClock, TomlConfigRepository,
-        ZbusNotificationSink, current_user_id,
+        PidfdTerminationPort, ProcMemoryPressureSource, SysinfoProcessSource, SystemClock,
+        TomlConfigRepository, ZbusNotificationSink, current_user_id,
     },
     application::{
-        MonitorService, NotificationAction, NotificationBinding, NotificationBindings,
-        NotificationEvent, NotificationRequest, NotificationSink, NotificationView, StopProcess,
+        EmergencyService, ForceStopProcess, MemoryPressureMonitor, MonitorService,
+        NotificationAction, NotificationBinding, NotificationBindings, NotificationEvent,
+        NotificationRequest, NotificationSink, NotificationView, ProcessSource, StopProcess,
     },
-    domain::IgnoreRule,
+    domain::{
+        EmergencyAction, EmergencyCandidate, IgnoreRule, MemoryPressureLevel,
+        force_termination_permitted,
+    },
 };
 
 use super::{
@@ -40,6 +44,12 @@ const MAX_RESPONSE_BYTES: u64 = 1_024 * 1_024;
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(2);
 const NOTIFICATION_RETRY_INTERVAL: Duration = Duration::from_secs(60);
 const MAX_NOTIFICATION_BINDINGS: usize = 256;
+
+#[derive(Debug)]
+struct PendingEmergency {
+    candidate: EmergencyCandidate,
+    force_at: tokio::time::Instant,
+}
 
 /// Runs the foreground monitoring daemon until SIGINT or SIGTERM is received.
 ///
@@ -87,6 +97,7 @@ fn initialize_tracing() {
         .try_init();
 }
 
+#[allow(clippy::too_many_lines)]
 async fn run_daemon_async() -> Result<(), RuntimeError> {
     let repository = TomlConfigRepository::from_environment()?;
     let mut settings = repository.load()?.settings;
@@ -102,6 +113,19 @@ async fn run_daemon_async() -> Result<(), RuntimeError> {
         settings.protection_policy(),
         settings.violation_policy(),
     );
+    let mut pressure_monitor = MemoryPressureMonitor::new(
+        ProcMemoryPressureSource::new(),
+        settings.memory_pressure_policy(),
+    );
+    let mut emergency = EmergencyService::new(
+        current_user_id(),
+        settings.protection_policy(),
+        settings.emergency_policy(),
+        settings.emergency.action_cooldown,
+    );
+    let emergency_epoch = std::time::Instant::now();
+    let mut pending_emergency = None;
+    let mut last_emergency_scan = None;
     let (notification_sender, mut notification_events) = tokio::sync::mpsc::channel(64);
     let mut notifier = if settings.notifications.enabled {
         connect_notifications(
@@ -119,12 +143,29 @@ async fn run_daemon_async() -> Result<(), RuntimeError> {
     notification_retry.tick().await;
     let mut interval = tokio::time::interval(settings.monitor.poll_interval);
     interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    let pressure_sleep = tokio::time::sleep(Duration::ZERO);
+    tokio::pin!(pressure_sleep);
     let shutdown = shutdown_signal();
     tokio::pin!(shutdown);
 
     info!(socket = %socket_path.display(), "resource guard daemon started");
     loop {
         tokio::select! {
+            () = &mut pressure_sleep => {
+                let level = handle_memory_pressure(
+                    &mut pressure_monitor,
+                    &mut emergency,
+                    &mut pending_emergency,
+                    &mut last_emergency_scan,
+                    emergency_epoch.elapsed(),
+                    &settings,
+                    &mut notifier,
+                    &state,
+                ).await;
+                pressure_sleep.as_mut().reset(
+                    tokio::time::Instant::now() + pressure_poll_interval(&settings, level),
+                );
+            }
             _ = interval.tick() => {
                 match monitor.poll() {
                     Ok(report) => record_monitor_report(
@@ -185,6 +226,201 @@ async fn run_daemon_async() -> Result<(), RuntimeError> {
     }
     info!("resource guard daemon stopped");
     Ok(())
+}
+
+const fn pressure_poll_interval(
+    settings: &crate::application::Settings,
+    level: MemoryPressureLevel,
+) -> Duration {
+    match level {
+        MemoryPressureLevel::Normal | MemoryPressureLevel::Recovery => {
+            settings.monitor.poll_interval
+        }
+        MemoryPressureLevel::Warning => settings.memory_pressure.warning_poll_interval,
+        MemoryPressureLevel::Critical => settings.memory_pressure.critical_poll_interval,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_memory_pressure(
+    pressure_monitor: &mut MemoryPressureMonitor<ProcMemoryPressureSource>,
+    emergency: &mut EmergencyService,
+    pending: &mut Option<PendingEmergency>,
+    last_emergency_scan: &mut Option<tokio::time::Instant>,
+    now: Duration,
+    settings: &crate::application::Settings,
+    notifier: &mut Option<ZbusNotificationSink>,
+    state: &Arc<RwLock<DaemonState>>,
+) -> MemoryPressureLevel {
+    let evaluation = match pressure_monitor.poll() {
+        Ok(evaluation) => evaluation,
+        Err(error) => {
+            record_poll_error(state, error).await;
+            return MemoryPressureLevel::Normal;
+        }
+    };
+    state.write().await.record_pressure(evaluation);
+
+    if evaluation.changed() {
+        warn!(
+            previous = ?evaluation.previous,
+            current = ?evaluation.current,
+            available_bytes = evaluation.sample.system.available_memory_bytes,
+            swap_used_bytes = evaluation.sample.system.used_swap_bytes,
+            psi_some_avg10 = evaluation.sample.psi.some_avg10,
+            psi_full_avg10 = evaluation.sample.psi.full_avg10,
+            "system memory pressure changed"
+        );
+    }
+
+    let mut outcome = None;
+    if evaluation.current != MemoryPressureLevel::Critical {
+        if pending.take().is_some() {
+            outcome = Some("memory pressure recovered before forceful termination".to_owned());
+        }
+    } else if pending
+        .as_ref()
+        .is_some_and(|pending| tokio::time::Instant::now() >= pending.force_at)
+    {
+        let completed = pending.take().expect("pending emergency was checked above");
+        outcome = Some(finish_pending_emergency(completed, settings, state).await);
+    }
+
+    let scan_due = last_emergency_scan
+        .is_none_or(|last| last.elapsed() >= settings.memory_pressure.warning_poll_interval);
+    if evaluation.current == MemoryPressureLevel::Critical
+        && pending.is_none()
+        && settings.emergency.action != EmergencyAction::NotifyOnly
+        && scan_due
+    {
+        *last_emergency_scan = Some(tokio::time::Instant::now());
+        let mut inventory = SysinfoProcessSource::new();
+        match inventory.snapshot() {
+            Ok(snapshot) => {
+                if let Some(candidate) =
+                    emergency.consider(evaluation.current, &snapshot.processes, now, false)
+                {
+                    outcome = Some(
+                        start_emergency_termination(candidate, settings, pending, state).await,
+                    );
+                }
+            }
+            Err(error) => record_poll_error(state, error).await,
+        }
+    }
+
+    if (evaluation.changed() && evaluation.current != MemoryPressureLevel::Normal)
+        || outcome.is_some()
+    {
+        send_pressure_notification(evaluation, outcome.as_deref(), notifier, state).await;
+    }
+
+    evaluation.current
+}
+
+async fn start_emergency_termination(
+    candidate: EmergencyCandidate,
+    settings: &crate::application::Settings,
+    pending: &mut Option<PendingEmergency>,
+    state: &Arc<RwLock<DaemonState>>,
+) -> String {
+    let identity = candidate.process.identity();
+    let mut source = SysinfoProcessSource::new();
+    let mut terminator = PidfdTerminationPort;
+    match StopProcess::new(
+        &mut source,
+        &mut terminator,
+        current_user_id(),
+        &settings.protection_policy(),
+    )
+    .execute(identity)
+    {
+        Ok(()) => {
+            let outcome = format!(
+                "SIGTERM sent to {} ({})",
+                candidate.process.name(),
+                identity.pid()
+            );
+            *pending = Some(PendingEmergency {
+                candidate,
+                force_at: tokio::time::Instant::now() + settings.emergency.term_grace_period,
+            });
+            state.write().await.record_emergency_action(outcome.clone());
+            warn!(pid = identity.pid(), "emergency SIGTERM sent");
+            outcome
+        }
+        Err(error) => {
+            let outcome = format!("emergency SIGTERM rejected for {}: {error}", identity.pid());
+            warn!(pid = identity.pid(), %error, "emergency SIGTERM rejected");
+            outcome
+        }
+    }
+}
+
+async fn finish_pending_emergency(
+    pending: PendingEmergency,
+    settings: &crate::application::Settings,
+    state: &Arc<RwLock<DaemonState>>,
+) -> String {
+    let identity = pending.candidate.process.identity();
+    let outcome = if force_termination_permitted(
+        MemoryPressureLevel::Critical,
+        settings.emergency.allow_sigkill,
+    ) {
+        let mut source = SysinfoProcessSource::new();
+        let mut terminator = PidfdTerminationPort;
+        match ForceStopProcess::new(
+            &mut source,
+            &mut terminator,
+            current_user_id(),
+            &settings.protection_policy(),
+        )
+        .execute(identity)
+        {
+            Ok(()) => format!(
+                "SIGKILL sent to {} ({}) after persistent critical pressure",
+                pending.candidate.process.name(),
+                identity.pid()
+            ),
+            Err(crate::application::StopError::NotFound { .. }) => format!(
+                "{} ({}) exited after SIGTERM",
+                pending.candidate.process.name(),
+                identity.pid()
+            ),
+            Err(error) => format!("emergency SIGKILL rejected for {}: {error}", identity.pid()),
+        }
+    } else {
+        format!(
+            "{} ({}) survived SIGTERM; automatic SIGKILL is disabled",
+            pending.candidate.process.name(),
+            identity.pid()
+        )
+    };
+    state.write().await.record_emergency_action(outcome.clone());
+    warn!(pid = identity.pid(), %outcome, "emergency action completed");
+    outcome
+}
+
+async fn send_pressure_notification(
+    evaluation: crate::domain::MemoryPressureEvaluation,
+    outcome: Option<&str>,
+    notifier: &mut Option<ZbusNotificationSink>,
+    state: &Arc<RwLock<DaemonState>>,
+) {
+    let Some(sink) = notifier.as_mut() else {
+        return;
+    };
+    if let Err(error) = sink
+        .notify(NotificationRequest::for_pressure(evaluation, outcome), None)
+        .await
+    {
+        warn!(%error, "memory pressure notification failed");
+        state
+            .write()
+            .await
+            .record_notification_error(error.to_string());
+        *notifier = None;
+    }
 }
 
 async fn record_poll_error(state: &Arc<RwLock<DaemonState>>, error: crate::application::PortError) {

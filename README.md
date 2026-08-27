@@ -9,6 +9,7 @@ The project is Linux-only. It does not require root privileges and is distribute
 ## Current features
 
 - polling through `sysinfo`, with a five-second default interval;
+- lightweight system memory pressure monitoring through available RAM, swap, and Linux PSI;
 - consecutive-sample, minimum-duration, and cooldown policies;
 - protected, temporary-ignore, and permanent-ignore process rules;
 - desktop notifications through `org.freedesktop.Notifications`;
@@ -17,6 +18,7 @@ The project is Linux-only. It does not require root privileges and is distribute
 - `status` and daemon-backed `top` commands;
 - PID reuse protection using PID, UID, and Linux process start time;
 - foreground daemon suitable for a `systemd --user` service.
+- opt-in emergency termination of allowlisted or largest unprotected current-user processes.
 
 The CLI can send a separately confirmed `SIGKILL` only after `SIGTERM` fails. Notification actions never send `SIGKILL`.
 
@@ -36,7 +38,7 @@ cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo test --locked --all-targets --all-features
 ```
 
-The measured release daemon uses 6.94 MiB peak RSS and averages 0.762% of one logical CPU core in the current 60-second baseline. See [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md) for the environment, methodology, limitations, and reproduction script.
+The measured release daemon uses 5.99 MiB peak RSS and averages 0.498% of one logical CPU core in the current 60-second normal-pressure baseline. See [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md) for the environment, methodology, limitations, and reproduction script.
 
 ## Install a published release
 
@@ -108,6 +110,38 @@ See [`config.example.toml`](config.example.toml) for all available settings. Exp
 The “Always ignore” notification action prefers the process executable path and falls back to its exact name. It atomically writes a complete normalized TOML document; comments in an existing file are therefore not preserved.
 
 Set `notifications.enabled = false` for a headless environment. If notifications are enabled but the desktop D-Bus service is unavailable, monitoring and CLI access continue normally, the error appears in `status`, and the daemon retries the connection after a cooldown.
+
+## Memory pressure and emergency mode
+
+Resource Guard separately monitors system-wide memory availability, swap usage, and pressure stall information from `/proc/pressure/memory`. Normal pressure sampling follows the regular five-second interval. Warning and critical states use the shorter intervals configured in `[memory_pressure]` without continuously scanning every process at the fastest rate.
+
+The default policy only reports pressure and never terminates a process automatically:
+
+```toml
+[emergency]
+action = "notify_only"
+allow_sigkill = false
+```
+
+To terminate only explicitly approved applications during persistent critical pressure, use exact process names or preferably absolute executable paths:
+
+```toml
+[emergency]
+action = "terminate_allowlisted"
+allow_sigkill = false
+allowed_names = []
+allowed_executables = ["/absolute/path/to/a/restartable-worker"]
+exempt_names = ["resource-guard"]
+exempt_executables = []
+```
+
+`terminate_largest_unprotected` is a more aggressive explicit opt-in. It selects the largest eligible process owned by the current user. Protected and emergency-exempt processes are never candidates. Ordinary ignored processes remain eligible because ignoring routine notifications is not an emergency safety guarantee.
+
+Emergency actions revalidate PID, UID, and process start time before every signal. Resource Guard first sends `SIGTERM`, waits for the configured grace period, and checks that system pressure is still critical. It can send `SIGKILL` only when `allow_sigkill = true`; this is disabled by default. Only one process is handled at a time, followed by an action cooldown.
+
+The emergency floor can enter the critical state immediately. Other critical conditions require the configured number of consecutive samples. Recovery uses a higher available-memory threshold to prevent rapid state oscillation. See [`config.example.toml`](config.example.toml) for all pressure thresholds and intervals.
+
+Userspace polling cannot guarantee recovery from every sudden allocation spike. Swap, cgroup memory controls, and a system OOM service remain useful independent safeguards.
 
 ## CLI
 

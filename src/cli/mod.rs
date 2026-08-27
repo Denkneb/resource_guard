@@ -182,6 +182,14 @@ pub fn execute(cli: Cli) -> Result<(), CliError> {
                 "swap: {} / {} bytes used",
                 status.used_swap_bytes, status.total_swap_bytes
             );
+            println!("memory pressure: {}", status.memory_pressure_level);
+            println!(
+                "memory PSI avg10: some {:.2}%, full {:.2}%",
+                status.memory_psi_some_avg10, status.memory_psi_full_avg10
+            );
+            if let Some(action) = status.last_emergency_action {
+                println!("last emergency action: {action}");
+            }
             println!("active events: {}", status.active_events);
             if let Some(error) = status.last_error {
                 println!("last error: {error}");

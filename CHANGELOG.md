@@ -7,6 +7,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Added
+
+- Added system-wide memory pressure monitoring based on available RAM, swap usage, and Linux PSI.
+- Added adaptive pressure polling, warning/critical/recovery states, and pressure details in daemon status and desktop notifications.
+- Added opt-in emergency policies for terminating allowlisted or largest unprotected current-user processes, with PID reuse protection, graceful termination, cooldowns, and separately enabled forceful fallback.
+- Added unit and controlled child-process integration coverage for pressure evaluation and emergency termination.
+
 ## [0.1.1] - 2026-08-27
 
 ### Added

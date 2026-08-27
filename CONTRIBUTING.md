@@ -71,11 +71,11 @@ Releases currently publish an `x86_64-unknown-linux-gnu` archive. Before creatin
 4. Build the archive twice in separate empty directories and compare the resulting SHA-256 checksums:
 
    ```sh
-   ./scripts/package-release.sh 0.1.1 /tmp/resource-guard-release-1
-   ./scripts/package-release.sh 0.1.1 /tmp/resource-guard-release-2
+   ./scripts/package-release.sh <version> /tmp/resource-guard-release-1
+   ./scripts/package-release.sh <version> /tmp/resource-guard-release-2
    ```
 
 5. Commit the release changes and ensure the commit passes CI.
-6. Create and push an annotated tag matching the Cargo version, such as `v0.1.1`.
+6. Create and push an annotated tag matching the Cargo version, such as `v0.2.0`.
 
 The tag-triggered release workflow reruns the full test suite, rejects a tag whose version differs from `Cargo.toml`, verifies the generated checksum, and publishes both files as a GitHub Release. The packaging script never creates commits, tags, or releases itself and refuses to overwrite an existing artifact.

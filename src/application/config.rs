@@ -1,12 +1,17 @@
 use std::{error::Error, fmt, path::PathBuf, time::Duration};
 
-use crate::domain::{IgnoreRule, ProtectionPolicy, Thresholds, ViolationPolicy};
+use crate::domain::{
+    EmergencyAction, EmergencyPolicy, IgnoreRule, MemoryPressurePolicy, ProtectionPolicy,
+    Thresholds, ViolationPolicy,
+};
 
 const BYTES_PER_MIB: u64 = 1_048_576;
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Settings {
     pub monitor: MonitorSettings,
+    pub memory_pressure: MemoryPressureSettings,
+    pub emergency: EmergencySettings,
     pub termination: TerminationSettings,
     pub processes: ProcessSettings,
     pub notifications: NotificationSettings,
@@ -31,6 +36,43 @@ impl Settings {
         if self.monitor.max_memory_bytes == 0 {
             return Err(ConfigValidationError::ZeroMemoryThreshold);
         }
+        if !valid_percent(self.memory_pressure.warning_available_percent)
+            || !valid_percent(self.memory_pressure.critical_available_percent)
+            || !valid_percent(self.memory_pressure.critical_swap_used_percent)
+            || !valid_percent(self.memory_pressure.recovery_available_percent)
+        {
+            return Err(ConfigValidationError::InvalidPressurePercentage);
+        }
+        if self.memory_pressure.critical_available_percent
+            >= self.memory_pressure.warning_available_percent
+            || self.memory_pressure.recovery_available_percent
+                <= self.memory_pressure.warning_available_percent
+        {
+            return Err(ConfigValidationError::InvalidPressureOrdering);
+        }
+        if self.memory_pressure.emergency_available_bytes == 0 {
+            return Err(ConfigValidationError::ZeroEmergencyMemoryFloor);
+        }
+        if !self.memory_pressure.critical_psi_full_avg10.is_finite()
+            || self.memory_pressure.critical_psi_full_avg10 < 0.0
+            || self.memory_pressure.critical_psi_full_avg10 > 100.0
+        {
+            return Err(ConfigValidationError::InvalidPsiThreshold);
+        }
+        if self.memory_pressure.critical_samples == 0 {
+            return Err(ConfigValidationError::ZeroCriticalSamples);
+        }
+        if self.memory_pressure.warning_poll_interval.is_zero()
+            || self.memory_pressure.critical_poll_interval.is_zero()
+        {
+            return Err(ConfigValidationError::ZeroPressurePollInterval);
+        }
+        if self.emergency.term_grace_period.is_zero() {
+            return Err(ConfigValidationError::ZeroEmergencyGracePeriod);
+        }
+        if self.emergency.action_cooldown.is_zero() {
+            return Err(ConfigValidationError::ZeroEmergencyCooldown);
+        }
         if self.termination.grace_period.is_zero() {
             return Err(ConfigValidationError::ZeroGracePeriod);
         }
@@ -43,6 +85,17 @@ impl Settings {
             .protected_executables
             .iter()
             .chain(&self.processes.ignored_executables)
+        {
+            if !path.is_absolute() {
+                return Err(ConfigValidationError::RelativeExecutable(path.clone()));
+            }
+        }
+
+        for path in self
+            .emergency
+            .allowed_executables
+            .iter()
+            .chain(&self.emergency.exempt_executables)
         {
             if !path.is_absolute() {
                 return Err(ConfigValidationError::RelativeExecutable(path.clone()));
@@ -79,6 +132,31 @@ impl Settings {
         )
     }
 
+    #[must_use]
+    pub const fn memory_pressure_policy(&self) -> MemoryPressurePolicy {
+        MemoryPressurePolicy {
+            enabled: self.memory_pressure.enabled,
+            warning_available_percent: self.memory_pressure.warning_available_percent,
+            critical_available_percent: self.memory_pressure.critical_available_percent,
+            emergency_available_bytes: self.memory_pressure.emergency_available_bytes,
+            critical_swap_used_percent: self.memory_pressure.critical_swap_used_percent,
+            critical_psi_full_avg10: self.memory_pressure.critical_psi_full_avg10,
+            critical_samples: self.memory_pressure.critical_samples,
+            recovery_available_percent: self.memory_pressure.recovery_available_percent,
+        }
+    }
+
+    #[must_use]
+    pub fn emergency_policy(&self) -> EmergencyPolicy {
+        EmergencyPolicy {
+            action: self.emergency.action,
+            allowed_names: self.emergency.allowed_names.iter().cloned().collect(),
+            allowed_executables: self.emergency.allowed_executables.iter().cloned().collect(),
+            exempt_names: self.emergency.exempt_names.iter().cloned().collect(),
+            exempt_executables: self.emergency.exempt_executables.iter().cloned().collect(),
+        }
+    }
+
     pub fn add_ignore_rule(&mut self, rule: IgnoreRule) {
         match rule {
             IgnoreRule::Name(name) => {
@@ -91,6 +169,68 @@ impl Settings {
                     self.processes.ignored_executables.push(path);
                 }
             }
+        }
+    }
+}
+
+const fn valid_percent(value: f32) -> bool {
+    value.is_finite() && value > 0.0 && value <= 100.0
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct MemoryPressureSettings {
+    pub enabled: bool,
+    pub warning_available_percent: f32,
+    pub critical_available_percent: f32,
+    pub emergency_available_bytes: u64,
+    pub critical_swap_used_percent: f32,
+    pub critical_psi_full_avg10: f32,
+    pub critical_samples: u32,
+    pub warning_poll_interval: Duration,
+    pub critical_poll_interval: Duration,
+    pub recovery_available_percent: f32,
+}
+
+impl Default for MemoryPressureSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            warning_available_percent: 15.0,
+            critical_available_percent: 8.0,
+            emergency_available_bytes: 512 * BYTES_PER_MIB,
+            critical_swap_used_percent: 90.0,
+            critical_psi_full_avg10: 5.0,
+            critical_samples: 2,
+            warning_poll_interval: Duration::from_secs(1),
+            critical_poll_interval: Duration::from_millis(500),
+            recovery_available_percent: 20.0,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct EmergencySettings {
+    pub action: EmergencyAction,
+    pub allow_sigkill: bool,
+    pub term_grace_period: Duration,
+    pub action_cooldown: Duration,
+    pub allowed_names: Vec<String>,
+    pub allowed_executables: Vec<PathBuf>,
+    pub exempt_names: Vec<String>,
+    pub exempt_executables: Vec<PathBuf>,
+}
+
+impl Default for EmergencySettings {
+    fn default() -> Self {
+        Self {
+            action: EmergencyAction::NotifyOnly,
+            allow_sigkill: false,
+            term_grace_period: Duration::from_secs(3),
+            action_cooldown: Duration::from_secs(30),
+            allowed_names: Vec::new(),
+            allowed_executables: Vec::new(),
+            exempt_names: vec!["resource-guard".to_owned()],
+            exempt_executables: Vec::new(),
         }
     }
 }
@@ -171,6 +311,14 @@ pub enum ConfigValidationError {
     ZeroConsecutiveSamples,
     InvalidCpuThreshold,
     ZeroMemoryThreshold,
+    InvalidPressurePercentage,
+    InvalidPressureOrdering,
+    ZeroEmergencyMemoryFloor,
+    InvalidPsiThreshold,
+    ZeroCriticalSamples,
+    ZeroPressurePollInterval,
+    ZeroEmergencyGracePeriod,
+    ZeroEmergencyCooldown,
     ZeroGracePeriod,
     ZeroNotificationTimeout,
     RelativeExecutable(PathBuf),
@@ -191,6 +339,46 @@ impl fmt::Display for ConfigValidationError {
             }
             Self::ZeroMemoryThreshold => {
                 write!(formatter, "memory threshold must be greater than zero")
+            }
+            Self::InvalidPressurePercentage => {
+                write!(
+                    formatter,
+                    "memory pressure percentages must be within 0..=100"
+                )
+            }
+            Self::InvalidPressureOrdering => write!(
+                formatter,
+                "critical memory percentage must be below warning and recovery must be above warning"
+            ),
+            Self::ZeroEmergencyMemoryFloor => {
+                write!(
+                    formatter,
+                    "emergency memory floor must be greater than zero"
+                )
+            }
+            Self::InvalidPsiThreshold => {
+                write!(formatter, "PSI threshold must be finite and within 0..=100")
+            }
+            Self::ZeroCriticalSamples => {
+                write!(formatter, "critical samples must be greater than zero")
+            }
+            Self::ZeroPressurePollInterval => {
+                write!(
+                    formatter,
+                    "memory pressure poll intervals must be greater than zero"
+                )
+            }
+            Self::ZeroEmergencyGracePeriod => {
+                write!(
+                    formatter,
+                    "emergency SIGTERM grace period must be greater than zero"
+                )
+            }
+            Self::ZeroEmergencyCooldown => {
+                write!(
+                    formatter,
+                    "emergency action cooldown must be greater than zero"
+                )
             }
             Self::ZeroGracePeriod => write!(formatter, "grace period must be greater than zero"),
             Self::ZeroNotificationTimeout => {

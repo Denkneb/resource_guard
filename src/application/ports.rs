@@ -1,6 +1,8 @@
 use std::{error::Error, fmt, time::Duration};
 
-use crate::domain::{ProcessDescriptor, ProcessIdentity, ProcessResources, SystemResources};
+use crate::domain::{
+    MemoryPressureSample, ProcessDescriptor, ProcessIdentity, ProcessResources, SystemResources,
+};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ObservedProcess {
@@ -63,6 +65,16 @@ pub trait ProcessSource {
     ///
     /// Returns an error when the underlying process source cannot be read.
     fn find(&mut self, pid: u32) -> Result<Option<ProcessDescriptor>, PortError>;
+}
+
+/// Outbound port for lightweight system-wide memory pressure sampling.
+pub trait MemoryPressureSource {
+    /// Reads memory availability, swap usage, and Linux pressure metrics.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the pressure source cannot be read or parsed.
+    fn sample(&mut self) -> Result<MemoryPressureSample, PortError>;
 }
 
 /// Outbound port which represents a graceful process termination request.

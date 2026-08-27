@@ -9,19 +9,19 @@ The CPU value includes process scans and control-socket work. Between polling cy
 
 ## Baseline result
 
-The baseline was recorded on 2026-08-27 from commit `ca52c0f` plus the measurement script and this documentation:
+The baseline was recorded on 2026-08-27 from the Resource Guard 0.2.0 emergency-mode change set:
 
 | Measurement | Result |
 | --- | ---: |
-| Release binary size | 7,470,440 bytes (7.12 MiB) |
+| Release binary size | 8,133,776 bytes (7.76 MiB) |
 | Warm-up | 10 seconds |
-| Measurement window | 60.334 seconds |
-| Process CPU time | 0.460 seconds |
-| Average CPU | 0.762% of one logical core |
-| Peak RSS | 7,104 KiB (6.94 MiB) |
-| Processes in final snapshot | 1,342 observed, 721 monitored |
+| Measurement window | 60.252 seconds |
+| Process CPU time | 0.300 seconds |
+| Average CPU | 0.498% of one logical core |
+| Peak RSS | 6,132 KiB (5.99 MiB) |
+| Processes in final snapshot | 779 observed, 214 monitored |
 
-Both acceptance thresholds passed. The measurements were taken with Rust 1.94.1 on Linux 6.8.0-138-generic x86_64. Results depend on the host, process count, kernel, allocator, and build toolchain, so this is a baseline rather than a universal resource guarantee.
+Both acceptance thresholds passed. The measurements were taken with Rust 1.98.0 on Linux 6.8.0-138-generic x86_64. The default `notify_only` emergency policy and normal five-second pressure interval were active. Results depend on the host, process count, pressure state, kernel, allocator, and build toolchain, so this is a baseline rather than a universal resource guarantee. Warning and critical modes intentionally poll more frequently and may use more CPU while the system is under memory pressure.
 
 ## Reproducing the measurement
 

@@ -39,6 +39,10 @@ fn config_show_prints_effective_defaults() {
     assert!(stdout.contains("protected_names = [\"resource-guard\"]"));
     assert!(stdout.contains("[notifications]"));
     assert!(stdout.contains("timeout_seconds = 15"));
+    assert!(stdout.contains("[memory_pressure]"));
+    assert!(stdout.contains("critical_poll_interval_ms = 500"));
+    assert!(stdout.contains("[emergency]"));
+    assert!(stdout.contains("action = \"notify_only\""));
 }
 
 #[test]
