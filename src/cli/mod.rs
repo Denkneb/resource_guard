@@ -1,7 +1,7 @@
 use std::{
     error::Error,
     fmt::{self, Write as _},
-    io::{self, Write as _},
+    io::{self, BufRead, IsTerminal, Write as _},
     process::ExitCode,
     thread,
     time::Duration,
@@ -14,7 +14,10 @@ use crate::{
         ConfigOrigin, PidfdTerminationPort, SysinfoProcessSource, SystemClock, ThreadSleeper,
         TomlConfigRepository, current_user_id,
     },
-    application::{PortError, ProcessSource, StopAndWait, StopError, StopOutcome},
+    application::{
+        ForceStopProcess, PortError, ProcessSource, StopAndWait, StopError, StopOutcome,
+        WaitForExit,
+    },
     runtime::{self, RuntimeError, TopResponse},
 };
 
@@ -45,7 +48,7 @@ enum Command {
     /// Gracefully stop a process after identity verification.
     Stop {
         pid: u32,
-        /// Request separately confirmed SIGKILL (not implemented yet).
+        /// Send SIGKILL after SIGTERM fails and a separate confirmation is given.
         #[arg(long)]
         kill: bool,
         /// Confirm a non-interactive SIGKILL request.
@@ -75,7 +78,10 @@ pub enum CliError {
     Stop(StopError),
     ProcessNotFound(u32),
     StillRunning { pid: u32, grace_period_seconds: u64 },
-    KillNotImplemented,
+    StillRunningAfterKill { pid: u32, wait_seconds: u64 },
+    ConfirmationRequired { pid: u32 },
+    ConfirmationDeclined { pid: u32 },
+    ConfirmationIo(io::Error),
     Runtime(RuntimeError),
     Output(io::Error),
     NotImplemented(&'static str),
@@ -95,10 +101,20 @@ impl fmt::Display for CliError {
                 formatter,
                 "process {pid} is still running after {grace_period_seconds} seconds"
             ),
-            Self::KillNotImplemented => write!(
+            Self::StillRunningAfterKill { pid, wait_seconds } => write!(
                 formatter,
-                "SIGKILL is not implemented yet; no signal was sent"
+                "process {pid} is still running {wait_seconds} seconds after SIGKILL"
             ),
+            Self::ConfirmationRequired { pid } => write!(
+                formatter,
+                "SIGKILL for process {pid} requires an interactive terminal; rerun with --kill --yes to confirm non-interactively"
+            ),
+            Self::ConfirmationDeclined { pid } => {
+                write!(formatter, "SIGKILL for process {pid} was not confirmed")
+            }
+            Self::ConfirmationIo(error) => {
+                write!(formatter, "cannot read SIGKILL confirmation: {error}")
+            }
             Self::Runtime(error) => error.fmt(formatter),
             Self::Output(error) => write!(formatter, "cannot write command output: {error}"),
             Self::NotImplemented(command) => {
@@ -144,7 +160,7 @@ pub fn run_from_environment() -> ExitCode {
 ///
 /// # Errors
 ///
-/// Returns configuration errors or a marker for commands not implemented yet.
+/// Returns configuration, runtime, process-control, or output errors.
 pub fn execute(cli: Cli) -> Result<(), CliError> {
     match cli.command {
         Command::Config { command } => execute_config(command.as_ref()),
@@ -257,11 +273,7 @@ fn format_duration(seconds: u64) -> String {
     }
 }
 
-fn execute_stop(pid: u32, kill: bool, _yes: bool) -> Result<(), CliError> {
-    if kill {
-        return Err(CliError::KillNotImplemented);
-    }
-
+fn execute_stop(pid: u32, kill: bool, yes: bool) -> Result<(), CliError> {
     let repository = TomlConfigRepository::from_environment()?;
     let loaded = repository.load()?;
     let protection = loaded.settings.protection_policy();
@@ -292,11 +304,76 @@ fn execute_stop(pid: u32, kill: bool, _yes: bool) -> Result<(), CliError> {
             println!("sent SIGTERM to {process_name} ({pid}); process exited");
             Ok(())
         }
-        StopOutcome::StillRunning => Err(CliError::StillRunning {
+        StopOutcome::StillRunning if !kill => Err(CliError::StillRunning {
             pid,
             grace_period_seconds: grace_period.as_secs(),
         }),
+        StopOutcome::StillRunning => {
+            if !yes {
+                confirm_force_kill(pid, &process_name)?;
+            }
+
+            let force_result =
+                ForceStopProcess::new(&mut source, &mut terminator, current_user_id(), &protection)
+                    .execute(identity);
+            match force_result {
+                Ok(()) => {}
+                Err(StopError::NotFound { .. } | StopError::IdentityChanged { .. }) => {
+                    println!(
+                        "sent SIGTERM to {process_name} ({pid}); original process exited before SIGKILL"
+                    );
+                    return Ok(());
+                }
+                Err(error) => return Err(error.into()),
+            }
+
+            match WaitForExit::new(&mut source, &clock, &sleeper).execute(identity, grace_period)? {
+                StopOutcome::Exited => {
+                    println!(
+                        "sent SIGTERM and confirmed SIGKILL to {process_name} ({pid}); process exited"
+                    );
+                    Ok(())
+                }
+                StopOutcome::StillRunning => Err(CliError::StillRunningAfterKill {
+                    pid,
+                    wait_seconds: grace_period.as_secs(),
+                }),
+            }
+        }
     }
+}
+
+fn confirm_force_kill(pid: u32, process_name: &str) -> Result<(), CliError> {
+    if !io::stdin().is_terminal() {
+        return Err(CliError::ConfirmationRequired { pid });
+    }
+
+    let mut stdin = io::stdin().lock();
+    let mut stderr = io::stderr().lock();
+    if read_force_kill_confirmation(&mut stdin, &mut stderr, pid, process_name)
+        .map_err(CliError::ConfirmationIo)?
+    {
+        Ok(())
+    } else {
+        Err(CliError::ConfirmationDeclined { pid })
+    }
+}
+
+fn read_force_kill_confirmation<R: BufRead, W: io::Write>(
+    input: &mut R,
+    output: &mut W,
+    pid: u32,
+    process_name: &str,
+) -> io::Result<bool> {
+    write!(
+        output,
+        "process {process_name} ({pid}) ignored SIGTERM; type {pid} to confirm SIGKILL: "
+    )?;
+    output.flush()?;
+
+    let mut confirmation = String::new();
+    input.read_line(&mut confirmation)?;
+    Ok(confirmation.trim() == pid.to_string())
 }
 
 fn execute_config(command: Option<&ConfigCommand>) -> Result<(), CliError> {
@@ -329,9 +406,14 @@ fn execute_config(command: Option<&ConfigCommand>) -> Result<(), CliError> {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Cursor;
+
     use clap::Parser;
 
-    use super::{Cli, Command, ConfigCommand, format_bytes, format_duration, render_top};
+    use super::{
+        Cli, Command, ConfigCommand, format_bytes, format_duration, read_force_kill_confirmation,
+        render_top,
+    };
     use crate::runtime::{TopProcess, TopResponse};
 
     #[test]
@@ -370,6 +452,44 @@ mod tests {
                 yes: false
             }
         ));
+    }
+
+    #[test]
+    fn parses_a_confirmed_force_stop() {
+        let cli = Cli::try_parse_from(["resource-guard", "stop", "42", "--kill", "--yes"]).unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Command::Stop {
+                pid: 42,
+                kill: true,
+                yes: true
+            }
+        ));
+    }
+
+    #[test]
+    fn accepts_only_the_exact_pid_as_force_kill_confirmation() {
+        let mut output = Vec::new();
+
+        assert!(
+            read_force_kill_confirmation(&mut Cursor::new(b"42\n"), &mut output, 42, "worker")
+                .unwrap()
+        );
+        assert!(String::from_utf8(output).unwrap().contains("type 42"));
+    }
+
+    #[test]
+    fn rejects_an_inexact_force_kill_confirmation() {
+        assert!(
+            !read_force_kill_confirmation(
+                &mut Cursor::new(b"yes\n"),
+                &mut Vec::new(),
+                42,
+                "worker"
+            )
+            .unwrap()
+        );
     }
 
     #[test]

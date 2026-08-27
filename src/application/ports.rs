@@ -75,6 +75,16 @@ pub trait TerminationPort {
     fn terminate(&mut self, identity: ProcessIdentity) -> Result<(), PortError>;
 }
 
+/// Outbound port which represents an explicit forceful process termination request.
+pub trait ForceTerminationPort {
+    /// Sends a forceful termination request to the exact process identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the termination request cannot be delivered.
+    fn force_terminate(&mut self, identity: ProcessIdentity) -> Result<(), PortError>;
+}
+
 /// Outbound port for monotonic application time.
 pub trait MonotonicClock {
     fn now(&self) -> Duration;

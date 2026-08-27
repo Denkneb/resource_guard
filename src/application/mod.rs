@@ -13,7 +13,9 @@ pub use notifications::{
     NotificationAction, NotificationEvent, NotificationRequest, NotificationSink,
 };
 pub use ports::{
-    MonotonicClock, ObservedProcess, PortError, ProcessSource, ResourceSnapshot, Sleeper,
-    TerminationPort,
+    ForceTerminationPort, MonotonicClock, ObservedProcess, PortError, ProcessSource,
+    ResourceSnapshot, Sleeper, TerminationPort,
 };
-pub use process_control::{StopAndWait, StopError, StopOutcome, StopProcess};
+pub use process_control::{
+    ForceStopProcess, StopAndWait, StopError, StopOutcome, StopProcess, WaitForExit,
+};

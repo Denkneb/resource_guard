@@ -2,7 +2,9 @@ use std::{error::Error, fmt, time::Duration};
 
 use crate::domain::{ProcessDisposition, ProcessIdentity, ProtectionPolicy};
 
-use super::{MonotonicClock, PortError, ProcessSource, Sleeper, TerminationPort};
+use super::{
+    ForceTerminationPort, MonotonicClock, PortError, ProcessSource, Sleeper, TerminationPort,
+};
 
 const WAIT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
@@ -24,6 +26,7 @@ pub enum StopError {
         pid: u32,
     },
     Termination(PortError),
+    ForceTermination(PortError),
 }
 
 impl fmt::Display for StopError {
@@ -43,6 +46,9 @@ impl fmt::Display for StopError {
             ),
             Self::Protected { pid } => write!(formatter, "process {pid} is protected"),
             Self::Termination(error) => write!(formatter, "cannot terminate process: {error}"),
+            Self::ForceTermination(error) => {
+                write!(formatter, "cannot forcefully terminate process: {error}")
+            }
         }
     }
 }
@@ -60,6 +66,19 @@ pub struct StopProcess<'a, S, T> {
     terminator: &'a mut T,
     current_uid: u32,
     protection: &'a ProtectionPolicy,
+}
+
+pub struct ForceStopProcess<'a, S, T> {
+    source: &'a mut S,
+    terminator: &'a mut T,
+    current_uid: u32,
+    protection: &'a ProtectionPolicy,
+}
+
+pub struct WaitForExit<'a, S, C, D> {
+    source: &'a mut S,
+    clock: &'a C,
+    sleeper: &'a D,
 }
 
 pub struct StopAndWait<'a, S, T, C, D> {
@@ -114,24 +133,7 @@ where
         )
         .execute(expected)?;
 
-        let started_waiting_at = self.clock.now();
-        loop {
-            let process = self
-                .source
-                .find(expected.pid())
-                .map_err(StopError::Inspection)?;
-            if process.is_none_or(|process| process.identity() != expected) {
-                return Ok(StopOutcome::Exited);
-            }
-
-            let elapsed = self.clock.now().saturating_sub(started_waiting_at);
-            if elapsed >= grace_period {
-                return Ok(StopOutcome::StillRunning);
-            }
-
-            self.sleeper
-                .sleep(WAIT_POLL_INTERVAL.min(grace_period.saturating_sub(elapsed)));
-        }
+        WaitForExit::new(self.source, self.clock, self.sleeper).execute(expected, grace_period)
     }
 }
 
@@ -161,49 +163,136 @@ where
     /// Returns an error when the process disappeared, changed identity, belongs to
     /// another user, is protected, or cannot receive the termination request.
     pub fn execute(&mut self, expected: ProcessIdentity) -> Result<(), StopError> {
-        let Some(actual) = self
-            .source
-            .find(expected.pid())
-            .map_err(StopError::Inspection)?
-        else {
-            return Err(StopError::NotFound {
-                pid: expected.pid(),
-            });
-        };
-        let actual_identity = actual.identity();
-
-        if actual_identity.uid() != self.current_uid {
-            return Err(StopError::WrongOwner {
-                pid: actual_identity.pid(),
-                owner_uid: actual_identity.uid(),
-            });
-        }
-        if actual_identity != expected {
-            return Err(StopError::IdentityChanged {
-                expected,
-                actual: actual_identity,
-            });
-        }
-        if self.protection.disposition(&actual) == ProcessDisposition::Protect {
-            return Err(StopError::Protected {
-                pid: actual_identity.pid(),
-            });
-        }
-
+        let actual_identity =
+            validate_process(self.source, expected, self.current_uid, self.protection)?;
         self.terminator
             .terminate(actual_identity)
             .map_err(StopError::Termination)
     }
 }
 
+impl<'a, S, T> ForceStopProcess<'a, S, T>
+where
+    S: ProcessSource,
+    T: ForceTerminationPort,
+{
+    pub fn new(
+        source: &'a mut S,
+        terminator: &'a mut T,
+        current_uid: u32,
+        protection: &'a ProtectionPolicy,
+    ) -> Self {
+        Self {
+            source,
+            terminator,
+            current_uid,
+            protection,
+        }
+    }
+
+    /// Revalidates and forcefully terminates one exact process identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the process disappeared, changed identity, belongs to
+    /// another user, is protected, or cannot receive the forceful termination request.
+    pub fn execute(&mut self, expected: ProcessIdentity) -> Result<(), StopError> {
+        let actual_identity =
+            validate_process(self.source, expected, self.current_uid, self.protection)?;
+        self.terminator
+            .force_terminate(actual_identity)
+            .map_err(StopError::ForceTermination)
+    }
+}
+
+impl<'a, S, C, D> WaitForExit<'a, S, C, D>
+where
+    S: ProcessSource,
+    C: MonotonicClock,
+    D: Sleeper,
+{
+    pub fn new(source: &'a mut S, clock: &'a C, sleeper: &'a D) -> Self {
+        Self {
+            source,
+            clock,
+            sleeper,
+        }
+    }
+
+    /// Waits until the exact process identity exits or the timeout expires.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the process inventory cannot be inspected.
+    pub fn execute(
+        &mut self,
+        expected: ProcessIdentity,
+        timeout: Duration,
+    ) -> Result<StopOutcome, StopError> {
+        let started_waiting_at = self.clock.now();
+        loop {
+            let process = self
+                .source
+                .find(expected.pid())
+                .map_err(StopError::Inspection)?;
+            if process.is_none_or(|process| process.identity() != expected) {
+                return Ok(StopOutcome::Exited);
+            }
+
+            let elapsed = self.clock.now().saturating_sub(started_waiting_at);
+            if elapsed >= timeout {
+                return Ok(StopOutcome::StillRunning);
+            }
+
+            self.sleeper
+                .sleep(WAIT_POLL_INTERVAL.min(timeout.saturating_sub(elapsed)));
+        }
+    }
+}
+
+fn validate_process<S: ProcessSource>(
+    source: &mut S,
+    expected: ProcessIdentity,
+    current_uid: u32,
+    protection: &ProtectionPolicy,
+) -> Result<ProcessIdentity, StopError> {
+    let Some(actual) = source.find(expected.pid()).map_err(StopError::Inspection)? else {
+        return Err(StopError::NotFound {
+            pid: expected.pid(),
+        });
+    };
+    let actual_identity = actual.identity();
+
+    if actual_identity.uid() != current_uid {
+        return Err(StopError::WrongOwner {
+            pid: actual_identity.pid(),
+            owner_uid: actual_identity.uid(),
+        });
+    }
+    if actual_identity != expected {
+        return Err(StopError::IdentityChanged {
+            expected,
+            actual: actual_identity,
+        });
+    }
+    if protection.disposition(&actual) == ProcessDisposition::Protect {
+        return Err(StopError::Protected {
+            pid: actual_identity.pid(),
+        });
+    }
+
+    Ok(actual_identity)
+}
+
 #[cfg(test)]
 mod tests {
     use std::{cell::Cell, collections::VecDeque, path::PathBuf, rc::Rc, time::Duration};
 
-    use super::{StopAndWait, StopError, StopOutcome, StopProcess};
+    use super::{ForceStopProcess, StopAndWait, StopError, StopOutcome, StopProcess};
     use crate::{
         application::{
-            MonotonicClock, PortError, ProcessSource, ResourceSnapshot, Sleeper, TerminationPort,
+            ForceTerminationPort, MonotonicClock, PortError, ProcessSource, ResourceSnapshot,
+            Sleeper, TerminationPort,
         },
         domain::{ProcessDescriptor, ProcessIdentity, ProtectionPolicy},
     };
@@ -241,6 +330,18 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct FakeForceTerminator {
+        terminated: Vec<ProcessIdentity>,
+    }
+
+    impl ForceTerminationPort for FakeForceTerminator {
+        fn force_terminate(&mut self, identity: ProcessIdentity) -> Result<(), PortError> {
+            self.terminated.push(identity);
+            Ok(())
+        }
+    }
+
     fn descriptor(identity: ProcessIdentity, name: &str) -> ProcessDescriptor {
         ProcessDescriptor::new(
             identity,
@@ -260,6 +361,21 @@ mod tests {
         };
         let mut terminator = FakeTerminator::default();
         let result = StopProcess::new(&mut source, &mut terminator, CURRENT_UID, protection)
+            .execute(expected);
+        (result, terminator)
+    }
+
+    fn execute_force(
+        expected: ProcessIdentity,
+        actual: Option<ProcessDescriptor>,
+        protection: &ProtectionPolicy,
+    ) -> (Result<(), StopError>, FakeForceTerminator) {
+        let mut source = FakeSource {
+            process: actual,
+            error: None,
+        };
+        let mut terminator = FakeForceTerminator::default();
+        let result = ForceStopProcess::new(&mut source, &mut terminator, CURRENT_UID, protection)
             .execute(expected);
         (result, terminator)
     }
@@ -331,6 +447,68 @@ mod tests {
 
         let (result, terminator) =
             execute(identity, Some(descriptor(identity, "desktop")), &protection);
+
+        assert_eq!(result, Err(StopError::Protected { pid: 42 }));
+        assert!(terminator.terminated.is_empty());
+    }
+
+    #[test]
+    fn forcefully_terminates_a_revalidated_process() {
+        let identity = ProcessIdentity::new(42, CURRENT_UID, 100);
+
+        let (result, terminator) = execute_force(
+            identity,
+            Some(descriptor(identity, "worker")),
+            &ProtectionPolicy::default(),
+        );
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(terminator.terminated, vec![identity]);
+    }
+
+    #[test]
+    fn force_stop_rejects_a_reused_pid() {
+        let expected = ProcessIdentity::new(42, CURRENT_UID, 100);
+        let actual = ProcessIdentity::new(42, CURRENT_UID, 101);
+
+        let (result, terminator) = execute_force(
+            expected,
+            Some(descriptor(actual, "worker")),
+            &ProtectionPolicy::default(),
+        );
+
+        assert_eq!(result, Err(StopError::IdentityChanged { expected, actual }));
+        assert!(terminator.terminated.is_empty());
+    }
+
+    #[test]
+    fn force_stop_rejects_a_process_owned_by_another_user() {
+        let expected = ProcessIdentity::new(42, CURRENT_UID, 100);
+        let actual = ProcessIdentity::new(42, CURRENT_UID + 1, 100);
+
+        let (result, terminator) = execute_force(
+            expected,
+            Some(descriptor(actual, "worker")),
+            &ProtectionPolicy::default(),
+        );
+
+        assert_eq!(
+            result,
+            Err(StopError::WrongOwner {
+                pid: 42,
+                owner_uid: CURRENT_UID + 1,
+            })
+        );
+        assert!(terminator.terminated.is_empty());
+    }
+
+    #[test]
+    fn force_stop_rejects_a_protected_process() {
+        let identity = ProcessIdentity::new(42, CURRENT_UID, 100);
+        let protection = ProtectionPolicy::new(["desktop".to_owned()], [], [], []);
+
+        let (result, terminator) =
+            execute_force(identity, Some(descriptor(identity, "desktop")), &protection);
 
         assert_eq!(result, Err(StopError::Protected { pid: 42 }));
         assert!(terminator.terminated.is_empty());

@@ -16,7 +16,7 @@ The project is Linux-only. It does not require root privileges and is distribute
 - PID reuse protection using PID, UID, and Linux process start time;
 - foreground daemon suitable for a `systemd --user` service.
 
-`SIGKILL` is deliberately not implemented yet. Notification actions never send it.
+The CLI can send a separately confirmed `SIGKILL` only after `SIGTERM` fails. Notification actions never send `SIGKILL`.
 
 ## Build
 
@@ -108,7 +108,15 @@ Gracefully stop a process:
 resource-guard stop PID
 ```
 
-Before sending `SIGTERM`, Resource Guard verifies that the process still has the expected PID, UID, and start time and is not protected. Only processes owned by the current user are eligible.
+Request a forceful fallback if the process survives its configured grace period:
+
+```console
+resource-guard stop PID --kill
+```
+
+The interactive command requires typing the exact PID before `SIGKILL` is sent. For explicit non-interactive automation, use `resource-guard stop PID --kill --yes`. If the process exits after `SIGTERM`, no confirmation is requested and no `SIGKILL` is sent.
+
+Before each signal, Resource Guard verifies that the process still has the expected PID, UID, and start time and is not protected. The pidfd adapter repeats the identity check immediately before signalling. Only processes owned by the current user are eligible.
 
 ## Runtime and security model
 
