@@ -1,5 +1,4 @@
 use std::{
-    collections::HashMap,
     fs, io,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
@@ -23,8 +22,8 @@ use crate::{
         ZbusNotificationSink, current_user_id,
     },
     application::{
-        MonitorEvent, MonitorService, NotificationAction, NotificationEvent, NotificationRequest,
-        NotificationSink, StopProcess,
+        MonitorService, NotificationAction, NotificationBinding, NotificationBindings,
+        NotificationEvent, NotificationRequest, NotificationSink, NotificationView, StopProcess,
     },
     domain::IgnoreRule,
 };
@@ -114,7 +113,7 @@ async fn run_daemon_async() -> Result<(), RuntimeError> {
     } else {
         None
     };
-    let mut notification_bindings = HashMap::<u32, MonitorEvent>::new();
+    let mut notification_bindings = NotificationBindings::new(MAX_NOTIFICATION_BINDINGS);
     let mut notification_retry = tokio::time::interval(NOTIFICATION_RETRY_INTERVAL);
     notification_retry.set_missed_tick_behavior(MissedTickBehavior::Skip);
     notification_retry.tick().await;
@@ -196,7 +195,7 @@ async fn record_poll_error(state: &Arc<RwLock<DaemonState>>, error: crate::appli
 async fn record_monitor_report(
     report: crate::application::MonitorReport,
     notifier: &mut Option<ZbusNotificationSink>,
-    bindings: &mut HashMap<u32, MonitorEvent>,
+    bindings: &mut NotificationBindings,
     state: &Arc<RwLock<DaemonState>>,
 ) {
     for event in &report.events {
@@ -209,9 +208,15 @@ async fn record_monitor_report(
             "process exceeded configured resource limits"
         );
         if let Some(sink) = notifier.as_mut() {
-            match sink.notify(NotificationRequest::from_event(event)).await {
+            match sink
+                .notify(NotificationRequest::from_event(event), None)
+                .await
+            {
                 Ok(notification_id) => {
-                    remember_notification(bindings, notification_id, event.clone());
+                    bindings.remember(
+                        notification_id,
+                        NotificationBinding::new(event.clone(), NotificationView::Summary),
+                    );
                     state.write().await.clear_notification_error();
                 }
                 Err(error) => {
@@ -237,7 +242,12 @@ async fn connect_notifications(
     match ZbusNotificationSink::connect(sender, timeout).await {
         Ok(sink) => {
             info!(
+                server = sink.server_name(),
+                vendor = sink.server_vendor(),
+                version = sink.server_version(),
+                specification = sink.specification_version(),
                 actions = sink.supports_actions(),
+                persistence = sink.supports_persistence(),
                 "desktop notifications connected"
             );
             state.write().await.clear_notification_error();
@@ -254,22 +264,9 @@ async fn connect_notifications(
     }
 }
 
-fn remember_notification(
-    bindings: &mut HashMap<u32, MonitorEvent>,
-    notification_id: u32,
-    event: MonitorEvent,
-) {
-    if bindings.len() >= MAX_NOTIFICATION_BINDINGS
-        && let Some(expired) = bindings.keys().copied().min()
-    {
-        bindings.remove(&expired);
-    }
-    bindings.insert(notification_id, event);
-}
-
 async fn handle_notification_event(
     event: NotificationEvent,
-    bindings: &mut HashMap<u32, MonitorEvent>,
+    bindings: &mut NotificationBindings,
     monitor: &mut MonitorService<SysinfoProcessSource, SystemClock>,
     notifier: &mut Option<ZbusNotificationSink>,
     repository: &TomlConfigRepository,
@@ -282,26 +279,52 @@ async fn handle_notification_event(
             action,
         } => (notification_id, action),
         NotificationEvent::Closed { notification_id } => {
-            bindings.remove(&notification_id);
+            bindings.remove(notification_id);
             return;
         }
         NotificationEvent::UnknownAction {
             notification_id,
             key,
         } => {
-            if bindings.contains_key(&notification_id) {
+            if bindings.contains(notification_id) {
                 warn!(notification_id, %key, "ignoring unknown notification action");
             }
             return;
         }
     };
-    let Some(monitored_event) = bindings.remove(&notification_id) else {
+    let Some(binding) = bindings.get(notification_id).cloned() else {
         warn!(
             notification_id,
             "ignoring action for an unknown notification"
         );
         return;
     };
+
+    if let Some(next_binding) = binding.transition(action) {
+        navigate_notification(notification_id, next_binding, bindings, notifier, state).await;
+        return;
+    }
+
+    if matches!(
+        action,
+        NotificationAction::Details | NotificationAction::Back
+    ) {
+        warn!(
+            notification_id,
+            view = ?binding.view(),
+            ?action,
+            "ignoring invalid notification navigation"
+        );
+        return;
+    }
+
+    bindings.remove(notification_id);
+    let monitored_event = binding.event();
+    if let Some(sink) = notifier.as_mut()
+        && let Err(error) = sink.close(notification_id).await
+    {
+        warn!(notification_id, %error, "cannot close handled desktop notification");
+    }
 
     match action {
         NotificationAction::Stop => {
@@ -350,20 +373,38 @@ async fn handle_notification_event(
                 }
             }
         }
-        NotificationAction::Details => {
-            if let Some(sink) = notifier.as_mut()
-                && let Err(error) = sink
-                    .notify(NotificationRequest::details(&monitored_event))
-                    .await
-            {
-                warn!(%error, "cannot display notification details");
-                state
-                    .write()
-                    .await
-                    .record_notification_error(error.to_string());
-                bindings.clear();
-                *notifier = None;
-            }
+        NotificationAction::Details | NotificationAction::Back => {}
+    }
+}
+
+async fn navigate_notification(
+    notification_id: u32,
+    next_binding: NotificationBinding,
+    bindings: &mut NotificationBindings,
+    notifier: &mut Option<ZbusNotificationSink>,
+    state: &Arc<RwLock<DaemonState>>,
+) {
+    let Some(sink) = notifier.as_mut() else {
+        bindings.remove(notification_id);
+        return;
+    };
+    match sink
+        .notify(next_binding.request(), Some(notification_id))
+        .await
+    {
+        Ok(replacement_id) => {
+            bindings.remove(notification_id);
+            bindings.remember(replacement_id, next_binding);
+            state.write().await.clear_notification_error();
+        }
+        Err(error) => {
+            warn!(%error, "cannot navigate desktop notification");
+            state
+                .write()
+                .await
+                .record_notification_error(error.to_string());
+            bindings.clear();
+            *notifier = None;
         }
     }
 }

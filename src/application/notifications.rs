@@ -1,4 +1,9 @@
-use std::{fmt::Write as _, future::Future, time::Duration};
+use std::{
+    collections::{HashMap, VecDeque},
+    fmt::Write as _,
+    future::Future,
+    time::Duration,
+};
 
 use crate::domain::{ProcessDescriptor, ProcessResources, ResourceBreach};
 
@@ -10,6 +15,7 @@ pub enum NotificationAction {
     IgnoreForHour,
     AlwaysIgnore,
     Details,
+    Back,
 }
 
 impl NotificationAction {
@@ -20,9 +26,16 @@ impl NotificationAction {
             "ignore_hour" => Some(Self::IgnoreForHour),
             "always_ignore" => Some(Self::AlwaysIgnore),
             "details" | "default" => Some(Self::Details),
+            "back" => Some(Self::Back),
             _ => None,
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NotificationView {
+    Summary,
+    Details,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -46,7 +59,7 @@ pub struct NotificationRequest {
     pub resources: ProcessResources,
     pub breach: ResourceBreach,
     pub exceeded_for: Duration,
-    pub detailed: bool,
+    pub view: NotificationView,
 }
 
 impl NotificationRequest {
@@ -57,15 +70,23 @@ impl NotificationRequest {
             resources: event.resources,
             breach: event.breach,
             exceeded_for: event.exceeded_for,
-            detailed: false,
+            view: NotificationView::Summary,
         }
     }
 
     #[must_use]
     pub fn details(event: &MonitorEvent) -> Self {
         Self {
-            detailed: true,
+            view: NotificationView::Details,
             ..Self::from_event(event)
+        }
+    }
+
+    #[must_use]
+    pub fn for_view(event: &MonitorEvent, view: NotificationView) -> Self {
+        match view {
+            NotificationView::Summary => Self::from_event(event),
+            NotificationView::Details => Self::details(event),
         }
     }
 
@@ -92,7 +113,7 @@ impl NotificationRequest {
             self.resources.resident_memory_bytes / 1_048_576,
             self.exceeded_for.as_secs(),
         );
-        if self.detailed {
+        if self.view == NotificationView::Details {
             let executable = self
                 .process
                 .executable()
@@ -109,6 +130,99 @@ impl NotificationRequest {
     }
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct NotificationBinding {
+    event: MonitorEvent,
+    view: NotificationView,
+}
+
+impl NotificationBinding {
+    #[must_use]
+    pub const fn new(event: MonitorEvent, view: NotificationView) -> Self {
+        Self { event, view }
+    }
+
+    #[must_use]
+    pub const fn event(&self) -> &MonitorEvent {
+        &self.event
+    }
+
+    #[must_use]
+    pub const fn view(&self) -> NotificationView {
+        self.view
+    }
+
+    #[must_use]
+    pub fn request(&self) -> NotificationRequest {
+        NotificationRequest::for_view(&self.event, self.view)
+    }
+
+    #[must_use]
+    pub fn transition(&self, action: NotificationAction) -> Option<Self> {
+        let view = match (self.view, action) {
+            (NotificationView::Summary, NotificationAction::Details) => NotificationView::Details,
+            (NotificationView::Details, NotificationAction::Back) => NotificationView::Summary,
+            _ => return None,
+        };
+        Some(Self::new(self.event.clone(), view))
+    }
+}
+
+#[derive(Debug)]
+pub struct NotificationBindings {
+    capacity: usize,
+    bindings: HashMap<u32, NotificationBinding>,
+    insertion_order: VecDeque<u32>,
+}
+
+impl NotificationBindings {
+    #[must_use]
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            capacity,
+            bindings: HashMap::new(),
+            insertion_order: VecDeque::new(),
+        }
+    }
+
+    pub fn remember(&mut self, notification_id: u32, binding: NotificationBinding) {
+        self.remove(notification_id);
+        while self.bindings.len() >= self.capacity {
+            let Some(oldest_id) = self.insertion_order.pop_front() else {
+                break;
+            };
+            self.bindings.remove(&oldest_id);
+        }
+        if self.capacity > 0 {
+            self.bindings.insert(notification_id, binding);
+            self.insertion_order.push_back(notification_id);
+        }
+    }
+
+    #[must_use]
+    pub fn get(&self, notification_id: u32) -> Option<&NotificationBinding> {
+        self.bindings.get(&notification_id)
+    }
+
+    #[must_use]
+    pub fn contains(&self, notification_id: u32) -> bool {
+        self.bindings.contains_key(&notification_id)
+    }
+
+    pub fn remove(&mut self, notification_id: u32) -> Option<NotificationBinding> {
+        if self.bindings.contains_key(&notification_id) {
+            self.insertion_order
+                .retain(|stored_id| *stored_id != notification_id);
+        }
+        self.bindings.remove(&notification_id)
+    }
+
+    pub fn clear(&mut self) {
+        self.bindings.clear();
+        self.insertion_order.clear();
+    }
+}
+
 fn escape_markup(value: &str) -> String {
     value
         .replace('&', "&amp;")
@@ -120,14 +234,21 @@ pub trait NotificationSink {
     fn notify(
         &mut self,
         request: NotificationRequest,
+        replaces_id: Option<u32>,
     ) -> impl Future<Output = Result<u32, PortError>> + Send;
+
+    fn close(&mut self, notification_id: u32)
+    -> impl Future<Output = Result<(), PortError>> + Send;
 }
 
 #[cfg(test)]
 mod tests {
     use std::{path::PathBuf, time::Duration};
 
-    use super::{NotificationAction, NotificationRequest, NotificationSink};
+    use super::{
+        NotificationAction, NotificationBinding, NotificationBindings, NotificationRequest,
+        NotificationSink, NotificationView,
+    };
     use crate::{
         application::{MonitorEvent, PortError},
         domain::{ProcessDescriptor, ProcessIdentity, ProcessResources, ResourceBreach},
@@ -197,7 +318,61 @@ mod tests {
             NotificationAction::from_key("default"),
             Some(NotificationAction::Details)
         );
+        assert_eq!(
+            NotificationAction::from_key("back"),
+            Some(NotificationAction::Back)
+        );
         assert_eq!(NotificationAction::from_key("unknown"), None);
+    }
+
+    #[test]
+    fn navigates_from_summary_to_details_and_back_for_the_same_process() {
+        let summary = NotificationBinding::new(event(), NotificationView::Summary);
+        let identity = summary.event().process.identity();
+
+        let details = summary.transition(NotificationAction::Details).unwrap();
+        assert_eq!(details.view(), NotificationView::Details);
+        assert_eq!(details.event().process.identity(), identity);
+        assert!(details.request().body().contains("Executable:"));
+
+        let restored = details.transition(NotificationAction::Back).unwrap();
+        assert_eq!(restored.view(), NotificationView::Summary);
+        assert_eq!(restored.event().process.identity(), identity);
+        assert!(!restored.request().body().contains("Executable:"));
+    }
+
+    #[test]
+    fn rejects_navigation_actions_from_the_wrong_view() {
+        let summary = NotificationBinding::new(event(), NotificationView::Summary);
+        let details = NotificationBinding::new(event(), NotificationView::Details);
+
+        assert!(summary.transition(NotificationAction::Back).is_none());
+        assert!(details.transition(NotificationAction::Details).is_none());
+    }
+
+    #[test]
+    fn bindings_remove_closed_notifications_and_evict_the_oldest_entry() {
+        let mut bindings = NotificationBindings::new(2);
+        bindings.remember(
+            20,
+            NotificationBinding::new(event(), NotificationView::Summary),
+        );
+        bindings.remember(
+            10,
+            NotificationBinding::new(event(), NotificationView::Summary),
+        );
+        bindings.remember(
+            30,
+            NotificationBinding::new(event(), NotificationView::Details),
+        );
+
+        assert!(!bindings.contains(20));
+        assert!(bindings.contains(10));
+        assert!(bindings.contains(30));
+
+        let closed = bindings.remove(10).unwrap();
+        assert_eq!(closed.view(), NotificationView::Summary);
+        assert!(!bindings.contains(10));
     }
 
     #[derive(Default)]
@@ -209,9 +384,17 @@ mod tests {
         fn notify(
             &mut self,
             request: NotificationRequest,
+            _replaces_id: Option<u32>,
         ) -> impl Future<Output = Result<u32, PortError>> + Send {
             self.requests.push(request);
             std::future::ready(Ok(7))
+        }
+
+        fn close(
+            &mut self,
+            _notification_id: u32,
+        ) -> impl Future<Output = Result<(), PortError>> + Send {
+            std::future::ready(Ok(()))
         }
     }
 
@@ -220,7 +403,7 @@ mod tests {
         let mut sink = FakeNotificationSink::default();
 
         let id = sink
-            .notify(NotificationRequest::from_event(&event()))
+            .notify(NotificationRequest::from_event(&event()), None)
             .await
             .unwrap();
 

@@ -8,6 +8,7 @@ const UNIT: &str = include_str!("../packaging/resource-guard.service");
 const README: &str = include_str!("../README.md");
 const RELEASE_WORKFLOW: &str = include_str!("../.github/workflows/release.yml");
 const PACKAGE_SCRIPT: &str = include_str!("../scripts/package-release.sh");
+const DESKTOP_ENTRY: &str = include_str!("../packaging/io.github.denkneb.ResourceGuard.desktop");
 
 #[test]
 fn user_service_has_the_expected_lifecycle_and_runtime_contract() {
@@ -38,6 +39,15 @@ fn readme_install_path_matches_the_unit() {
     assert!(README.contains("$HOME/.local/bin/resource-guard"));
     assert!(README.contains("$HOME/.config/systemd/user/resource-guard.service"));
     assert!(README.contains("systemctl --user enable --now resource-guard.service"));
+    assert!(README.contains("io.github.denkneb.ResourceGuard.desktop"));
+}
+
+#[test]
+fn desktop_entry_provides_the_notification_application_identity() {
+    assert!(DESKTOP_ENTRY.contains("Type=Application"));
+    assert!(DESKTOP_ENTRY.contains("Name=Resource Guard"));
+    assert!(DESKTOP_ENTRY.contains("NoDisplay=true"));
+    assert!(DESKTOP_ENTRY.contains("Exec=resource-guard status"));
 }
 
 #[test]
@@ -129,6 +139,7 @@ fn release_archives_are_reproducible_and_contain_the_installation_payload() {
         "bin/resource-guard",
         "config/config.example.toml",
         "systemd/resource-guard.service",
+        "applications/io.github.denkneb.ResourceGuard.desktop",
         "README.md",
         "CHANGELOG.md",
         "LICENSE",

@@ -45,6 +45,8 @@ trap 'rm -rf -- "$release_staging_dir"' EXIT
 install -Dm755 "$release_binary" "$release_staging_dir/$archive_root/bin/resource-guard"
 install -Dm644 config.example.toml "$release_staging_dir/$archive_root/config/config.example.toml"
 install -Dm644 packaging/resource-guard.service "$release_staging_dir/$archive_root/systemd/resource-guard.service"
+install -Dm644 packaging/io.github.denkneb.ResourceGuard.desktop \
+    "$release_staging_dir/$archive_root/applications/io.github.denkneb.ResourceGuard.desktop"
 install -Dm644 README.md "$release_staging_dir/$archive_root/README.md"
 install -Dm644 CHANGELOG.md "$release_staging_dir/$archive_root/CHANGELOG.md"
 install -Dm644 LICENSE "$release_staging_dir/$archive_root/LICENSE"

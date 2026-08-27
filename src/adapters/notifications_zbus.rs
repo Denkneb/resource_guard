@@ -2,20 +2,46 @@ use std::{collections::HashMap, future::Future, time::Duration};
 
 use futures_util::StreamExt;
 use tokio::sync::mpsc;
-use zbus::{Connection, Proxy, zvariant::OwnedValue};
+use zbus::{
+    Connection, Proxy,
+    zvariant::{OwnedValue, Str},
+};
 
 use crate::application::{
-    NotificationAction, NotificationEvent, NotificationRequest, NotificationSink, PortError,
+    NotificationAction, NotificationEvent, NotificationRequest, NotificationSink, NotificationView,
+    PortError,
 };
 
 const SERVICE: &str = "org.freedesktop.Notifications";
 const PATH: &str = "/org/freedesktop/Notifications";
 const INTERFACE: &str = "org.freedesktop.Notifications";
+const DESKTOP_ENTRY: &str = "io.github.denkneb.ResourceGuard";
+const SUMMARY_ACTIONS: &[&str] = &[
+    "stop",
+    "Остановить",
+    "ignore_hour",
+    "Игнорировать на час",
+    "always_ignore",
+    "Всегда игнорировать",
+    "details",
+    "Подробнее",
+];
+const DETAILS_ACTIONS: &[&str] = &["back", "Назад"];
+
+#[derive(Debug)]
+struct NotificationServer {
+    name: String,
+    vendor: String,
+    version: String,
+    specification_version: String,
+    supports_actions: bool,
+    supports_persistence: bool,
+}
 
 #[derive(Debug)]
 pub struct ZbusNotificationSink {
     connection: Connection,
-    supports_actions: bool,
+    server: NotificationServer,
     timeout_milliseconds: i32,
     listener: tokio::task::JoinHandle<()>,
 }
@@ -39,13 +65,25 @@ impl ZbusNotificationSink {
             .call("GetCapabilities", &())
             .await
             .map_err(|error| PortError::new("read notification capabilities", error.to_string()))?;
+        let (name, vendor, version, specification_version): (String, String, String, String) =
+            proxy
+                .call("GetServerInformation", &())
+                .await
+                .map_err(|error| {
+                    PortError::new("read notification server information", error.to_string())
+                })?;
         let listener = subscribe_to_events(connection.clone(), events).await?;
 
         Ok(Self {
             connection,
-            supports_actions: capabilities
-                .iter()
-                .any(|capability| capability == "actions"),
+            server: NotificationServer {
+                name,
+                vendor,
+                version,
+                specification_version,
+                supports_actions: has_capability(&capabilities, "actions"),
+                supports_persistence: has_capability(&capabilities, "persistence"),
+            },
             timeout_milliseconds: timeout_milliseconds(timeout),
             listener,
         })
@@ -53,7 +91,32 @@ impl ZbusNotificationSink {
 
     #[must_use]
     pub const fn supports_actions(&self) -> bool {
-        self.supports_actions
+        self.server.supports_actions
+    }
+
+    #[must_use]
+    pub const fn supports_persistence(&self) -> bool {
+        self.server.supports_persistence
+    }
+
+    #[must_use]
+    pub fn server_name(&self) -> &str {
+        &self.server.name
+    }
+
+    #[must_use]
+    pub fn server_vendor(&self) -> &str {
+        &self.server.vendor
+    }
+
+    #[must_use]
+    pub fn server_version(&self) -> &str {
+        &self.server.version
+    }
+
+    #[must_use]
+    pub fn specification_version(&self) -> &str {
+        &self.server.specification_version
     }
 }
 
@@ -67,33 +130,22 @@ impl NotificationSink for ZbusNotificationSink {
     fn notify(
         &mut self,
         request: NotificationRequest,
+        replaces_id: Option<u32>,
     ) -> impl Future<Output = Result<u32, PortError>> + Send {
         let connection = self.connection.clone();
-        let supports_actions = self.supports_actions;
+        let supports_actions = self.server.supports_actions;
+        let supports_persistence = self.server.supports_persistence;
         let timeout = self.timeout_milliseconds;
         async move {
             let proxy = notification_proxy(&connection).await?;
-            let actions: &[&str] = if supports_actions && !request.detailed {
-                &[
-                    "stop",
-                    "Остановить",
-                    "ignore_hour",
-                    "Игнорировать на час",
-                    "always_ignore",
-                    "Всегда игнорировать",
-                    "details",
-                    "Подробнее",
-                ]
-            } else {
-                &[]
-            };
-            let hints = HashMap::<&str, OwnedValue>::new();
+            let actions = notification_actions(request.view, supports_actions);
+            let hints = notification_hints(supports_persistence);
             proxy
                 .call(
                     "Notify",
                     &(
                         "Resource Guard",
-                        0_u32,
+                        replaces_id.unwrap_or_default(),
                         "dialog-warning",
                         request.summary(),
                         request.body(),
@@ -106,6 +158,46 @@ impl NotificationSink for ZbusNotificationSink {
                 .map_err(|error| PortError::new("send desktop notification", error.to_string()))
         }
     }
+
+    fn close(
+        &mut self,
+        notification_id: u32,
+    ) -> impl Future<Output = Result<(), PortError>> + Send {
+        let connection = self.connection.clone();
+        async move {
+            let proxy = notification_proxy(&connection).await?;
+            proxy
+                .call("CloseNotification", &(notification_id,))
+                .await
+                .map_err(|error| PortError::new("close desktop notification", error.to_string()))
+        }
+    }
+}
+
+fn has_capability(capabilities: &[String], expected: &str) -> bool {
+    capabilities.iter().any(|capability| capability == expected)
+}
+
+fn notification_actions(view: NotificationView, supports_actions: bool) -> &'static [&'static str] {
+    if !supports_actions {
+        return &[];
+    }
+    match view {
+        NotificationView::Summary => SUMMARY_ACTIONS,
+        NotificationView::Details => DETAILS_ACTIONS,
+    }
+}
+
+fn notification_hints(supports_persistence: bool) -> HashMap<&'static str, OwnedValue> {
+    let mut hints = HashMap::from([
+        ("desktop-entry", OwnedValue::from(Str::from(DESKTOP_ENTRY))),
+        ("transient", OwnedValue::from(false)),
+        ("urgency", OwnedValue::from(1_u8)),
+    ]);
+    if supports_persistence {
+        hints.insert("resident", OwnedValue::from(true));
+    }
+    hints
 }
 
 async fn notification_proxy(connection: &Connection) -> Result<Proxy<'_>, PortError> {
@@ -193,11 +285,38 @@ fn timeout_milliseconds(timeout: Duration) -> i32 {
 mod tests {
     use std::time::Duration;
 
-    use super::timeout_milliseconds;
+    use super::{DESKTOP_ENTRY, notification_actions, notification_hints, timeout_milliseconds};
+    use crate::application::NotificationView;
 
     #[test]
     fn notification_timeout_is_safely_bounded() {
         assert_eq!(timeout_milliseconds(Duration::from_secs(15)), 15_000);
         assert_eq!(timeout_milliseconds(Duration::MAX), i32::MAX);
+    }
+
+    #[test]
+    fn summary_and_details_expose_the_expected_actions() {
+        let summary = notification_actions(NotificationView::Summary, true);
+        let details = notification_actions(NotificationView::Details, true);
+
+        assert!(summary.contains(&"details"));
+        assert!(summary.contains(&"stop"));
+        assert_eq!(details, ["back", "Назад"]);
+        assert!(notification_actions(NotificationView::Summary, false).is_empty());
+    }
+
+    #[test]
+    fn notification_hints_identify_a_persistent_desktop_application() {
+        let hints = notification_hints(true);
+        let desktop_entry = <&str>::try_from(hints.get("desktop-entry").unwrap()).unwrap();
+        let transient = bool::try_from(hints.get("transient").unwrap()).unwrap();
+        let urgency = u8::try_from(hints.get("urgency").unwrap()).unwrap();
+        let resident = bool::try_from(hints.get("resident").unwrap()).unwrap();
+
+        assert_eq!(desktop_entry, DESKTOP_ENTRY);
+        assert!(!transient);
+        assert_eq!(urgency, 1);
+        assert!(resident);
+        assert!(!notification_hints(false).contains_key("resident"));
     }
 }

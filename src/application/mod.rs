@@ -10,7 +10,8 @@ pub use config::{
 };
 pub use monitor::{MonitorEvent, MonitorReport, MonitorService, MonitoredProcess};
 pub use notifications::{
-    NotificationAction, NotificationEvent, NotificationRequest, NotificationSink,
+    NotificationAction, NotificationBinding, NotificationBindings, NotificationEvent,
+    NotificationRequest, NotificationSink, NotificationView,
 };
 pub use ports::{
     ForceTerminationPort, MonotonicClock, ObservedProcess, PortError, ProcessSource,

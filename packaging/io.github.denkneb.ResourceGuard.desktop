@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Version=1.5
+Name=Resource Guard
+Comment=Monitor sustained per-process CPU and memory usage
+Exec=resource-guard status
+TryExec=resource-guard
+Icon=dialog-warning
+Terminal=true
+NoDisplay=true
+Categories=System;
+StartupNotify=false

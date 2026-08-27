@@ -10,6 +10,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 ### Fixed
 
 - Removed hardening directives that prevented the service from starting under `systemd --user` when the unprivileged manager cannot adjust capability bounding sets.
+- Added a stable desktop application identity and persistence hints so supported notification servers can retain and group Resource Guard warnings.
+- Added safe in-place navigation from notification details back to the actionable summary.
 
 ## [0.1.0] - 2026-08-27
 

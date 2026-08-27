@@ -54,6 +54,8 @@ Install the extracted binary and user service without `sudo`:
 install -Dm755 bin/resource-guard "$HOME/.local/bin/resource-guard"
 install -Dm644 systemd/resource-guard.service \
   "$HOME/.config/systemd/user/resource-guard.service"
+install -Dm644 applications/io.github.denkneb.ResourceGuard.desktop \
+  "$HOME/.local/share/applications/io.github.denkneb.ResourceGuard.desktop"
 systemctl --user daemon-reload
 systemctl --user enable --now resource-guard.service
 ```
@@ -66,11 +68,13 @@ Install the binary and user unit without `sudo`:
 install -Dm755 target/release/resource-guard "$HOME/.local/bin/resource-guard"
 install -Dm644 packaging/resource-guard.service \
   "$HOME/.config/systemd/user/resource-guard.service"
+install -Dm644 packaging/io.github.denkneb.ResourceGuard.desktop \
+  "$HOME/.local/share/applications/io.github.denkneb.ResourceGuard.desktop"
 systemctl --user daemon-reload
 systemctl --user enable --now resource-guard.service
 ```
 
-The packaged unit expects the binary at `~/.local/bin/resource-guard`. It creates the private runtime directory used by the control socket and restarts the daemon after unexpected failures.
+The packaged unit expects the binary at `~/.local/bin/resource-guard`. It creates the private runtime directory used by the control socket and restarts the daemon after unexpected failures. The desktop entry gives notifications a stable application identity so compatible desktop environments can group them and retain them in notification history.
 
 Inspect the service and its logs with:
 
@@ -155,6 +159,7 @@ The user service applies a restrictive umask, prevents privilege escalation, per
 ```console
 systemctl --user disable --now resource-guard.service
 rm "$HOME/.config/systemd/user/resource-guard.service"
+rm "$HOME/.local/share/applications/io.github.denkneb.ResourceGuard.desktop"
 systemctl --user daemon-reload
 ```
 
