@@ -322,10 +322,7 @@ async fn handle_notification_event(
             }
         }
         NotificationAction::IgnoreForHour => {
-            monitor.ignore_for(
-                monitored_event.process.identity(),
-                Duration::from_secs(60 * 60),
-            );
+            monitor.ignore_for(monitored_event.process.identity(), Duration::from_hours(1));
             info!(
                 pid = monitored_event.process.identity().pid(),
                 "process ignored for one hour"
