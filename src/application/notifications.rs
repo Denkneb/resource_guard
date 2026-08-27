@@ -46,11 +46,32 @@ pub enum NotificationEvent {
     },
     Closed {
         notification_id: u32,
+        reason: NotificationCloseReason,
     },
     UnknownAction {
         notification_id: u32,
         key: String,
     },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NotificationCloseReason {
+    Expired,
+    DismissedByUser,
+    ClosedBySender,
+    Undefined(u32),
+}
+
+impl NotificationCloseReason {
+    #[must_use]
+    pub const fn from_code(code: u32) -> Self {
+        match code {
+            1 => Self::Expired,
+            2 => Self::DismissedByUser,
+            3 => Self::ClosedBySender,
+            other => Self::Undefined(other),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -246,8 +267,8 @@ mod tests {
     use std::{path::PathBuf, time::Duration};
 
     use super::{
-        NotificationAction, NotificationBinding, NotificationBindings, NotificationRequest,
-        NotificationSink, NotificationView,
+        NotificationAction, NotificationBinding, NotificationBindings, NotificationCloseReason,
+        NotificationRequest, NotificationSink, NotificationView,
     };
     use crate::{
         application::{MonitorEvent, PortError},
@@ -323,6 +344,26 @@ mod tests {
             Some(NotificationAction::Back)
         );
         assert_eq!(NotificationAction::from_key("unknown"), None);
+    }
+
+    #[test]
+    fn maps_freedesktop_notification_close_reasons() {
+        assert_eq!(
+            NotificationCloseReason::from_code(1),
+            NotificationCloseReason::Expired
+        );
+        assert_eq!(
+            NotificationCloseReason::from_code(2),
+            NotificationCloseReason::DismissedByUser
+        );
+        assert_eq!(
+            NotificationCloseReason::from_code(3),
+            NotificationCloseReason::ClosedBySender
+        );
+        assert_eq!(
+            NotificationCloseReason::from_code(99),
+            NotificationCloseReason::Undefined(99)
+        );
     }
 
     #[test]

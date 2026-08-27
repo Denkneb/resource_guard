@@ -278,17 +278,18 @@ async fn handle_notification_event(
             notification_id,
             action,
         } => (notification_id, action),
-        NotificationEvent::Closed { notification_id } => {
-            bindings.remove(notification_id);
+        NotificationEvent::Closed {
+            notification_id,
+            reason,
+        } => {
+            record_notification_closed(bindings, notification_id, reason);
             return;
         }
         NotificationEvent::UnknownAction {
             notification_id,
             key,
         } => {
-            if bindings.contains(notification_id) {
-                warn!(notification_id, %key, "ignoring unknown notification action");
-            }
+            record_unknown_notification_action(bindings, notification_id, &key);
             return;
         }
     };
@@ -320,11 +321,7 @@ async fn handle_notification_event(
 
     bindings.remove(notification_id);
     let monitored_event = binding.event();
-    if let Some(sink) = notifier.as_mut()
-        && let Err(error) = sink.close(notification_id).await
-    {
-        warn!(notification_id, %error, "cannot close handled desktop notification");
-    }
+    close_handled_notification(notifier, notification_id).await;
 
     match action {
         NotificationAction::Stop => {
@@ -375,6 +372,36 @@ async fn handle_notification_event(
         }
         NotificationAction::Details | NotificationAction::Back => {}
     }
+}
+
+async fn close_handled_notification(
+    notifier: &mut Option<ZbusNotificationSink>,
+    notification_id: u32,
+) {
+    if let Some(sink) = notifier.as_mut()
+        && let Err(error) = sink.close(notification_id).await
+    {
+        warn!(notification_id, %error, "cannot close handled desktop notification");
+    }
+}
+
+fn record_unknown_notification_action(
+    bindings: &NotificationBindings,
+    notification_id: u32,
+    key: &str,
+) {
+    if bindings.contains(notification_id) {
+        warn!(notification_id, %key, "ignoring unknown notification action");
+    }
+}
+
+fn record_notification_closed(
+    bindings: &mut NotificationBindings,
+    notification_id: u32,
+    reason: crate::application::NotificationCloseReason,
+) {
+    bindings.remove(notification_id);
+    info!(notification_id, ?reason, "desktop notification closed");
 }
 
 async fn navigate_notification(

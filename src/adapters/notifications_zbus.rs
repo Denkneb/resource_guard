@@ -8,8 +8,8 @@ use zbus::{
 };
 
 use crate::application::{
-    NotificationAction, NotificationEvent, NotificationRequest, NotificationSink, NotificationView,
-    PortError,
+    NotificationAction, NotificationCloseReason, NotificationEvent, NotificationRequest,
+    NotificationSink, NotificationView, PortError,
 };
 
 const SERVICE: &str = "org.freedesktop.Notifications";
@@ -60,6 +60,14 @@ impl ZbusNotificationSink {
         let connection = Connection::session()
             .await
             .map_err(|error| PortError::new("connect to session D-Bus", error.to_string()))?;
+        Self::connect_with_connection(connection, events, timeout).await
+    }
+
+    async fn connect_with_connection(
+        connection: Connection,
+        events: mpsc::Sender<Result<NotificationEvent, PortError>>,
+        timeout: Duration,
+    ) -> Result<Self, PortError> {
         let proxy = notification_proxy(&connection).await?;
         let capabilities: Vec<String> = proxy
             .call("GetCapabilities", &())
@@ -270,11 +278,14 @@ fn parse_action(message: &zbus::Message) -> Result<NotificationEvent, PortError>
 }
 
 fn parse_closed(message: &zbus::Message) -> Result<NotificationEvent, PortError> {
-    let (notification_id, _reason): (u32, u32) = message
+    let (notification_id, reason): (u32, u32) = message
         .body()
         .deserialize()
         .map_err(|error| PortError::new("decode notification closure", error.to_string()))?;
-    Ok(NotificationEvent::Closed { notification_id })
+    Ok(NotificationEvent::Closed {
+        notification_id,
+        reason: NotificationCloseReason::from_code(reason),
+    })
 }
 
 fn timeout_milliseconds(timeout: Duration) -> i32 {
@@ -282,41 +293,4 @@ fn timeout_milliseconds(timeout: Duration) -> i32 {
 }
 
 #[cfg(test)]
-mod tests {
-    use std::time::Duration;
-
-    use super::{DESKTOP_ENTRY, notification_actions, notification_hints, timeout_milliseconds};
-    use crate::application::NotificationView;
-
-    #[test]
-    fn notification_timeout_is_safely_bounded() {
-        assert_eq!(timeout_milliseconds(Duration::from_secs(15)), 15_000);
-        assert_eq!(timeout_milliseconds(Duration::MAX), i32::MAX);
-    }
-
-    #[test]
-    fn summary_and_details_expose_the_expected_actions() {
-        let summary = notification_actions(NotificationView::Summary, true);
-        let details = notification_actions(NotificationView::Details, true);
-
-        assert!(summary.contains(&"details"));
-        assert!(summary.contains(&"stop"));
-        assert_eq!(details, ["back", "Назад"]);
-        assert!(notification_actions(NotificationView::Summary, false).is_empty());
-    }
-
-    #[test]
-    fn notification_hints_identify_a_persistent_desktop_application() {
-        let hints = notification_hints(true);
-        let desktop_entry = <&str>::try_from(hints.get("desktop-entry").unwrap()).unwrap();
-        let transient = bool::try_from(hints.get("transient").unwrap()).unwrap();
-        let urgency = u8::try_from(hints.get("urgency").unwrap()).unwrap();
-        let resident = bool::try_from(hints.get("resident").unwrap()).unwrap();
-
-        assert_eq!(desktop_entry, DESKTOP_ENTRY);
-        assert!(!transient);
-        assert_eq!(urgency, 1);
-        assert!(resident);
-        assert!(!notification_hints(false).contains_key("resident"));
-    }
-}
+mod tests;

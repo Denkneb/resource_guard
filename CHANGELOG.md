@@ -7,6 +7,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Added
+
+- Added typed desktop notification closure diagnostics and private D-Bus integration coverage for notification payloads, actions, replacement IDs, and closure signals.
+
 ### Fixed
 
 - Removed hardening directives that prevented the service from starting under `systemd --user` when the unprivileged manager cannot adjust capability bounding sets.
