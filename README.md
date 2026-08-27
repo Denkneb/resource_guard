@@ -22,7 +22,7 @@ The CLI can send a separately confirmed `SIGKILL` only after `SIGTERM` fails. No
 
 ## Build
 
-Install a stable Rust toolchain, then build the release binary:
+Install Rust 1.95 or newer, then build the release binary:
 
 ```console
 cargo build --release --locked
@@ -43,9 +43,9 @@ The measured release daemon uses 6.94 MiB peak RSS and averages 0.762% of one lo
 Release archives currently target 64-bit glibc-based Linux (`x86_64-unknown-linux-gnu`). Download the archive and its `.sha256` file from the corresponding GitHub release, then verify and extract it:
 
 ```console
-sha256sum --check resource-guard-0.1.0-x86_64-unknown-linux-gnu.tar.gz.sha256
-tar -xzf resource-guard-0.1.0-x86_64-unknown-linux-gnu.tar.gz
-cd resource-guard-0.1.0-x86_64-unknown-linux-gnu
+sha256sum --check resource-guard-0.1.1-x86_64-unknown-linux-gnu.tar.gz.sha256
+tar -xzf resource-guard-0.1.1-x86_64-unknown-linux-gnu.tar.gz
+cd resource-guard-0.1.1-x86_64-unknown-linux-gnu
 ```
 
 Install the extracted binary and user service without `sudo`:

@@ -5,6 +5,8 @@ use std::{fs, process::Command};
 use tempfile::TempDir;
 
 const UNIT: &str = include_str!("../packaging/resource-guard.service");
+const CARGO_MANIFEST: &str = include_str!("../Cargo.toml");
+const CI_WORKFLOW: &str = include_str!("../.github/workflows/ci.yml");
 const README: &str = include_str!("../README.md");
 const RELEASE_WORKFLOW: &str = include_str!("../.github/workflows/release.yml");
 const PACKAGE_SCRIPT: &str = include_str!("../scripts/package-release.sh");
@@ -43,6 +45,13 @@ fn readme_install_path_matches_the_unit() {
 }
 
 #[test]
+fn package_declares_and_ci_checks_the_msrv() {
+    assert!(CARGO_MANIFEST.contains("rust-version = \"1.95\""));
+    assert!(CI_WORKFLOW.contains("dtolnay/rust-toolchain@1.95.0"));
+    assert!(CI_WORKFLOW.contains("cargo check --locked --all-targets --all-features"));
+}
+
+#[test]
 fn desktop_entry_provides_the_notification_application_identity() {
     assert!(DESKTOP_ENTRY.contains("Type=Application"));
     assert!(DESKTOP_ENTRY.contains("Name=Resource Guard"));
@@ -74,6 +83,12 @@ fn release_workflow_is_tag_only_and_uses_the_packaging_script() {
     assert!(RELEASE_WORKFLOW.contains("\"v*.*.*\""));
     assert!(!RELEASE_WORKFLOW.contains("workflow_dispatch:"));
     assert!(RELEASE_WORKFLOW.contains("./scripts/package-release.sh"));
+    assert!(RELEASE_WORKFLOW.contains("cargo fmt --all -- --check"));
+    assert!(
+        RELEASE_WORKFLOW
+            .contains("cargo clippy --locked --all-targets --all-features -- -D warnings")
+    );
+    assert!(RELEASE_WORKFLOW.contains("cargo test --locked --all-targets --all-features"));
     assert!(RELEASE_WORKFLOW.contains("sha256sum --check"));
     assert!(RELEASE_WORKFLOW.contains("gh release create"));
     assert!(RELEASE_WORKFLOW.contains("--verify-tag"));
