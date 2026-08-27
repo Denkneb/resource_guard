@@ -7,6 +7,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed
+
+- Removed hardening directives that prevented the service from starting under `systemd --user` when the unprivileged manager cannot adjust capability bounding sets.
+
 ## [0.1.0] - 2026-08-27
 
 ### Added

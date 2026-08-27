@@ -148,7 +148,7 @@ The daemon exposes `$XDG_RUNTIME_DIR/resource-guard/control.sock`. The directory
 
 Resource spikes do not immediately trigger notifications: the configured number of consecutive samples and minimum duration must both be reached. Notification IDs are mapped to full process identities, so an action cannot silently follow a reused PID.
 
-The user service applies a restrictive umask, drops all capabilities, permits only Unix-domain sockets, and enables compatible systemd hardening options. It intentionally retains access to the current user's processes, configuration directory, and desktop session bus.
+The user service applies a restrictive umask, prevents privilege escalation, permits only Unix-domain sockets, and enables compatible systemd hardening options. It runs as the current unprivileged user, whose process starts without Linux capabilities. It intentionally retains access to the current user's processes, configuration directory, and desktop session bus.
 
 ## Uninstall the user service
 

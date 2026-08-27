@@ -26,7 +26,11 @@ fn user_service_does_not_request_root_and_keeps_required_access() {
     assert!(!UNIT.contains("ProtectHome="));
     assert!(UNIT.contains("NoNewPrivileges=yes"));
     assert!(UNIT.contains("RestrictAddressFamilies=AF_UNIX"));
-    assert!(UNIT.contains("CapabilityBoundingSet=\n"));
+    assert!(!UNIT.contains("CapabilityBoundingSet="));
+    assert!(!UNIT.contains("AmbientCapabilities="));
+    for incompatible_directive in ["PrivateDevices=", "ProtectClock=", "ProtectKernelModules="] {
+        assert!(!UNIT.contains(incompatible_directive));
+    }
 }
 
 #[test]
