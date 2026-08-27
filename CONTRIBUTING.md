@@ -54,3 +54,9 @@ cargo deny --all-features check advisories bans licenses sources
 ```
 
 These network-dependent checks are deliberately kept out of the local Git hooks. Do not add advisory or license exceptions without documenting a concrete reason and reviewing the impact.
+
+## Dependency updates
+
+Dependabot checks Cargo dependencies and GitHub Actions every Monday. Minor and patch updates are grouped per ecosystem, while major updates remain separate pull requests. Dependabot does not merge changes automatically.
+
+Review grouped updates as one change set, inspect upstream release notes, and confirm both CI and dependency-policy checks before merging. Major updates require an explicit compatibility review even when all automated checks pass.
