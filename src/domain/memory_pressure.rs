@@ -127,10 +127,7 @@ impl MemoryPressureTracker {
         }
 
         if self.level == MemoryPressureLevel::Critical {
-            if available_percent >= self.policy.recovery_available_percent
-                && !swap_critical
-                && !psi_critical
-            {
+            if available_percent >= self.policy.recovery_available_percent && !psi_critical {
                 return MemoryPressureLevel::Recovery;
             }
             return MemoryPressureLevel::Critical;
@@ -142,7 +139,6 @@ impl MemoryPressureTracker {
 
         if critical_signal
             || available_percent <= self.policy.warning_available_percent
-            || swap_critical
             || psi_critical
         {
             return MemoryPressureLevel::Warning;
@@ -205,6 +201,16 @@ mod tests {
     }
 
     #[test]
+    fn full_swap_without_active_memory_pressure_stays_normal() {
+        let mut tracker = MemoryPressureTracker::new(policy());
+
+        assert_eq!(
+            tracker.evaluate(sample(16, 10, 0.0)).current,
+            MemoryPressureLevel::Normal
+        );
+    }
+
+    #[test]
     fn emergency_floor_is_immediately_critical() {
         let mut tracker = MemoryPressureTracker::new(policy());
         let mut urgent = sample(1, 0, 0.0);
@@ -232,6 +238,22 @@ mod tests {
         );
         assert_eq!(
             tracker.evaluate(sample(8, 0, 0.0)).current,
+            MemoryPressureLevel::Normal
+        );
+    }
+
+    #[test]
+    fn recovered_memory_leaves_critical_even_when_swap_remains_full() {
+        let mut tracker = MemoryPressureTracker::new(policy());
+        tracker.evaluate(sample(2, 10, 0.0));
+        tracker.evaluate(sample(2, 10, 0.0));
+
+        assert_eq!(
+            tracker.evaluate(sample(8, 10, 0.0)).current,
+            MemoryPressureLevel::Recovery
+        );
+        assert_eq!(
+            tracker.evaluate(sample(8, 10, 0.0)).current,
             MemoryPressureLevel::Normal
         );
     }

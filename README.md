@@ -113,7 +113,7 @@ Set `notifications.enabled = false` for a headless environment. If notifications
 
 ## Memory pressure and emergency mode
 
-Resource Guard separately monitors system-wide memory availability, swap usage, and pressure stall information from `/proc/pressure/memory`. Normal pressure sampling follows the regular five-second interval. Warning and critical states use the shorter intervals configured in `[memory_pressure]` without continuously scanning every process at the fastest rate.
+Resource Guard separately monitors system-wide memory availability, swap usage, and pressure stall information from `/proc/pressure/memory`. Swap occupancy is treated as supporting evidence only when available RAM is also critically low; stale pages in a full swap do not independently create pressure or prevent recovery after RAM and PSI normalize. Normal pressure sampling follows the regular five-second interval. Warning and critical states use the shorter intervals configured in `[memory_pressure]` without continuously scanning every process at the fastest rate.
 
 The default policy only reports pressure and never terminates a process automatically:
 

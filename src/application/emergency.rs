@@ -175,4 +175,29 @@ mod tests {
                 .is_some()
         );
     }
+
+    #[test]
+    fn recovery_state_never_selects_a_victim() {
+        let mut service = EmergencyService::new(
+            1_000,
+            ProtectionPolicy::default(),
+            EmergencyPolicy {
+                action: EmergencyAction::TerminateAllowlisted,
+                allowed_names: HashSet::from(["browser".to_owned()]),
+                ..EmergencyPolicy::default()
+            },
+            Duration::from_secs(30),
+        );
+
+        assert!(
+            service
+                .consider(
+                    MemoryPressureLevel::Recovery,
+                    &[process(42, "browser", 4_096)],
+                    Duration::ZERO,
+                    false,
+                )
+                .is_none()
+        );
+    }
 }
