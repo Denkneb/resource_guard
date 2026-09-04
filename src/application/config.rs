@@ -326,21 +326,10 @@ impl Default for StaleWorkloadSettings {
                 .into_iter()
                 .map(str::to_owned)
                 .collect(),
-            launcher_names: vec![
-                "uv",
-                "pytest",
-                "coverage",
-                "black",
-                "pre-commit",
-                "python",
-                "python3",
-                "xargs",
-                "bash",
-                "sh",
-            ]
-            .into_iter()
-            .map(str::to_owned)
-            .collect(),
+            launcher_names: vec!["uv", "pytest", "coverage", "black", "pre-commit"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect(),
             ignored_root_names: Vec::new(),
             minimum_age: Duration::from_hours(1),
             minimum_tree_memory_bytes: 256 * BYTES_PER_MIB,

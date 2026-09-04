@@ -11,7 +11,7 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
-- Added configurable detection of old, low-CPU developer-tool workload trees during system memory pressure.
+- Added configurable detection of old, low-CPU developer-tool workload trees during system memory pressure, bounded by dedicated launcher processes rather than generic shells, Python interpreters, or `xargs`.
 - Added actionable workload notifications with details, temporary ignore, persistent ignore, and safe leaf-first `SIGTERM`.
 - Added daemon-backed `stale` inspection and an exact-PID-confirmed `stop-tree` command.
 

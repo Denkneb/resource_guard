@@ -248,7 +248,9 @@ mod tests {
 
     fn tree() -> Vec<ObservedProcess> {
         vec![
-            process(10, None, "uv", 40),
+            process(9, None, "bash", 10),
+            process(8, Some(9), "xargs", 10),
+            process(10, Some(8), "uv", 40),
             process(11, Some(10), "pytest", 80),
             process(12, Some(11), "pytest", 60),
         ]
@@ -261,6 +263,7 @@ mod tests {
         assert_eq!(workloads.len(), 1);
         assert_eq!(workloads[0].identity().pid(), 10);
         assert_eq!(workloads[0].total_memory_bytes, 180);
+        assert_eq!(workloads[0].process_count(), 3);
         assert_eq!(
             workloads[0]
                 .termination_order()

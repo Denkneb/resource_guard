@@ -202,8 +202,13 @@ fn top_fails_when_daemon_is_absent() {
 }
 
 #[test]
-fn stale_reports_an_empty_snapshot_when_pressure_is_normal() {
+fn stale_reports_an_empty_snapshot_when_detection_is_disabled() {
     let directory = tempfile::tempdir().unwrap();
+    fs::write(
+        directory.path().join("config.toml"),
+        "[stale_workloads]\nenabled = false\n",
+    )
+    .unwrap();
     let _daemon = start_daemon(&directory);
 
     let output = isolated_command(&directory).arg("stale").output().unwrap();

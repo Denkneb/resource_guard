@@ -151,7 +151,7 @@ Userspace polling cannot guarantee recovery from every sudden allocation spike. 
 
 ## Stale workload detection
 
-During warning, critical, or recovery memory pressure, Resource Guard can identify old, low-CPU trees created by configured developer tools such as `pytest`, `coverage`, `black`, and `pre-commit`. A candidate must exceed the configured age and aggregate resident-memory thresholds for several consecutive samples. The detector groups related launcher processes without crossing into an unrelated parent session.
+During warning, critical, or recovery memory pressure, Resource Guard can identify old, low-CPU trees created by configured developer tools such as `pytest`, `coverage`, `black`, and `pre-commit`. A candidate must exceed the configured age and aggregate resident-memory thresholds for several consecutive samples. The detector groups related dedicated launcher processes without crossing into an unrelated parent session. Generic shells, Python interpreters, and `xargs` are excluded from the default launcher list so an action does not absorb an interactive shell or unrelated sibling workloads.
 
 This feature is notification-only by default and never sends a signal automatically. The notification supports details, one-hour ignore, permanent root-name ignore, and a graceful stop action. Stopping revalidates PID, UID, and start time for every member and sends only `SIGTERM`, leaf-first. There is no `SIGKILL` fallback for workload trees.
 
