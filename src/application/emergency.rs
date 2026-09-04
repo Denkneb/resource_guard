@@ -1,8 +1,7 @@
 use std::{collections::HashMap, time::Duration};
 
 use crate::domain::{
-    EmergencyCandidate, EmergencyPolicy, MemoryPressureLevel, ProcessIdentity, ProtectionPolicy,
-    select_emergency_victim,
+    EmergencyCandidate, EmergencyPolicy, ProcessIdentity, ProtectionPolicy, select_emergency_victim,
 };
 
 use super::ObservedProcess;
@@ -38,7 +37,7 @@ impl EmergencyService {
     #[must_use]
     pub fn consider(
         &mut self,
-        level: MemoryPressureLevel,
+        automatic_action_permitted: bool,
         processes: &[ObservedProcess],
         now: Duration,
         action_pending: bool,
@@ -65,7 +64,7 @@ impl EmergencyService {
                 .any(|candidate| candidate.process.identity() == *identity)
         });
 
-        if level != MemoryPressureLevel::Critical
+        if !automatic_action_permitted
             || action_pending
             || self
                 .last_action_at
@@ -94,8 +93,8 @@ mod tests {
     use crate::{
         application::ObservedProcess,
         domain::{
-            EmergencyAction, EmergencyPolicy, MemoryPressureLevel, ProcessDescriptor,
-            ProcessIdentity, ProcessResources, ProtectionPolicy,
+            EmergencyAction, EmergencyPolicy, ProcessDescriptor, ProcessIdentity, ProcessResources,
+            ProtectionPolicy,
         },
     };
 
@@ -132,22 +131,12 @@ mod tests {
 
         assert!(
             service
-                .consider(
-                    MemoryPressureLevel::Critical,
-                    &processes,
-                    Duration::ZERO,
-                    false,
-                )
+                .consider(true, &processes, Duration::ZERO, false,)
                 .is_some()
         );
         assert!(
             service
-                .consider(
-                    MemoryPressureLevel::Critical,
-                    &processes,
-                    Duration::from_secs(10),
-                    false,
-                )
+                .consider(true, &processes, Duration::from_secs(10), false,)
                 .is_none()
         );
     }
@@ -166,18 +155,13 @@ mod tests {
 
         assert!(
             service
-                .consider(
-                    MemoryPressureLevel::Critical,
-                    &[process(42, "worker", 4_096)],
-                    Duration::ZERO,
-                    false,
-                )
+                .consider(true, &[process(42, "worker", 4_096)], Duration::ZERO, false,)
                 .is_some()
         );
     }
 
     #[test]
-    fn recovery_state_never_selects_a_victim() {
+    fn cleared_activation_never_selects_a_victim() {
         let mut service = EmergencyService::new(
             1_000,
             ProtectionPolicy::default(),
@@ -192,7 +176,7 @@ mod tests {
         assert!(
             service
                 .consider(
-                    MemoryPressureLevel::Recovery,
+                    false,
                     &[process(42, "browser", 4_096)],
                     Duration::ZERO,
                     false,

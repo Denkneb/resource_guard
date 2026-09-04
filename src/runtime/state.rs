@@ -17,6 +17,10 @@ pub(crate) struct DaemonState {
     total_swap_bytes: u64,
     used_swap_bytes: u64,
     memory_pressure_level: MemoryPressureLevel,
+    memory_pressure_reason: String,
+    automatic_emergency_action_permitted: bool,
+    emergency_action_available_bytes: u64,
+    emergency_action_psi_full_avg10: f32,
     memory_psi_some_avg10: f32,
     memory_psi_full_avg10: f32,
     last_emergency_action: Option<String>,
@@ -38,6 +42,10 @@ impl DaemonState {
             total_swap_bytes: 0,
             used_swap_bytes: 0,
             memory_pressure_level: MemoryPressureLevel::Normal,
+            memory_pressure_reason: "none".to_owned(),
+            automatic_emergency_action_permitted: false,
+            emergency_action_available_bytes: 0,
+            emergency_action_psi_full_avg10: 0.0,
             memory_psi_some_avg10: 0.0,
             memory_psi_full_avg10: 0.0,
             last_emergency_action: None,
@@ -50,16 +58,31 @@ impl DaemonState {
         }
     }
 
-    pub(crate) fn record_pressure(&mut self, evaluation: MemoryPressureEvaluation) {
+    pub(crate) fn record_pressure(
+        &mut self,
+        evaluation: MemoryPressureEvaluation,
+        automatic_action_permitted: bool,
+        action_available_bytes: u64,
+        action_psi_full_avg10: f32,
+    ) -> bool {
+        let permission_changed =
+            self.automatic_emergency_action_permitted != automatic_action_permitted;
         self.last_poll_at = Some(Instant::now());
         self.total_memory_bytes = evaluation.sample.system.total_memory_bytes;
         self.available_memory_bytes = evaluation.sample.system.available_memory_bytes;
         self.total_swap_bytes = evaluation.sample.system.total_swap_bytes;
         self.used_swap_bytes = evaluation.sample.system.used_swap_bytes;
         self.memory_pressure_level = evaluation.current;
+        evaluation
+            .reason()
+            .clone_into(&mut self.memory_pressure_reason);
+        self.automatic_emergency_action_permitted = automatic_action_permitted;
+        self.emergency_action_available_bytes = action_available_bytes;
+        self.emergency_action_psi_full_avg10 = action_psi_full_avg10;
         self.memory_psi_some_avg10 = evaluation.sample.psi.some_avg10;
         self.memory_psi_full_avg10 = evaluation.sample.psi.full_avg10;
         self.last_error = None;
+        permission_changed
     }
 
     pub(crate) fn record_emergency_action(&mut self, action: impl Into<String>) {
@@ -108,6 +131,10 @@ impl DaemonState {
             total_swap_bytes: self.total_swap_bytes,
             used_swap_bytes: self.used_swap_bytes,
             memory_pressure_level: pressure_level_name(self.memory_pressure_level).to_owned(),
+            memory_pressure_reason: self.memory_pressure_reason.clone(),
+            automatic_emergency_action_permitted: self.automatic_emergency_action_permitted,
+            emergency_action_available_bytes: self.emergency_action_available_bytes,
+            emergency_action_psi_full_avg10: self.emergency_action_psi_full_avg10,
             memory_psi_some_avg10: self.memory_psi_some_avg10,
             memory_psi_full_avg10: self.memory_psi_full_avg10,
             last_emergency_action: self.last_emergency_action.clone(),

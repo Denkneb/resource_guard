@@ -1,6 +1,26 @@
 use std::{cmp::Ordering, collections::HashSet, path::PathBuf};
 
-use super::{MemoryPressureLevel, ProcessDescriptor, ProcessResources, ProtectionPolicy};
+use super::{
+    MemoryPressureEvaluation, MemoryPressureLevel, ProcessDescriptor, ProcessResources,
+    ProtectionPolicy,
+};
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct EmergencyActivationPolicy {
+    pub action_available_bytes: u64,
+    pub action_psi_full_avg10: f32,
+}
+
+impl EmergencyActivationPolicy {
+    #[must_use]
+    pub fn permits(self, evaluation: MemoryPressureEvaluation) -> bool {
+        (evaluation.current != MemoryPressureLevel::Normal
+            && evaluation.sample.system.available_memory_bytes <= self.action_available_bytes)
+            || (evaluation.current == MemoryPressureLevel::Critical
+                && evaluation.signals.available_critical
+                && evaluation.sample.psi.full_avg10 >= self.action_psi_full_avg10)
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum EmergencyAction {
@@ -68,8 +88,11 @@ pub fn select_emergency_victim<'a>(
 }
 
 #[must_use]
-pub const fn force_termination_permitted(level: MemoryPressureLevel, allow_sigkill: bool) -> bool {
-    allow_sigkill && matches!(level, MemoryPressureLevel::Critical)
+pub const fn force_termination_permitted(
+    automatic_action_permitted: bool,
+    allow_sigkill: bool,
+) -> bool {
+    automatic_action_permitted && allow_sigkill
 }
 
 fn compare_candidates(left: &EmergencyCandidate, right: &EmergencyCandidate) -> Ordering {
@@ -91,11 +114,13 @@ mod tests {
     use std::{collections::HashSet, path::PathBuf, time::Duration};
 
     use super::{
-        EmergencyAction, EmergencyCandidate, EmergencyPolicy, force_termination_permitted,
-        select_emergency_victim,
+        EmergencyAction, EmergencyActivationPolicy, EmergencyCandidate, EmergencyPolicy,
+        force_termination_permitted, select_emergency_victim,
     };
     use crate::domain::{
-        MemoryPressureLevel, ProcessDescriptor, ProcessIdentity, ProcessResources, ProtectionPolicy,
+        MemoryPressureEvaluation, MemoryPressureLevel, MemoryPressureSample, MemoryPressureSignals,
+        MemoryPsi, ProcessDescriptor, ProcessIdentity, ProcessResources, ProtectionPolicy,
+        SystemResources,
     };
 
     fn candidate(pid: u32, uid: u32, name: &str, memory: u64, growth: u64) -> EmergencyCandidate {
@@ -123,6 +148,49 @@ mod tests {
             exempt_names: HashSet::from(["desktop".to_owned()]),
             ..EmergencyPolicy::default()
         }
+    }
+
+    fn pressure(available: u64, psi_full_avg10: f32) -> MemoryPressureEvaluation {
+        MemoryPressureEvaluation {
+            previous: MemoryPressureLevel::Warning,
+            current: MemoryPressureLevel::Critical,
+            sample: MemoryPressureSample {
+                system: SystemResources {
+                    total_memory_bytes: 32 * 1_024 * 1_024 * 1_024,
+                    available_memory_bytes: available,
+                    total_swap_bytes: 2 * 1_024 * 1_024 * 1_024,
+                    used_swap_bytes: 2 * 1_024 * 1_024 * 1_024,
+                },
+                psi: MemoryPsi {
+                    some_avg10: psi_full_avg10,
+                    full_avg10: psi_full_avg10,
+                },
+            },
+            signals: MemoryPressureSignals {
+                available_warning: true,
+                available_critical: true,
+                available_recovered: false,
+                swap_critical: true,
+                psi_critical: psi_full_avg10 >= 5.0,
+                emergency_floor: available <= 512 * 1_024 * 1_024,
+            },
+        }
+    }
+
+    #[test]
+    fn activation_requires_configured_floor_or_low_memory_with_psi() {
+        let policy = EmergencyActivationPolicy {
+            action_available_bytes: 1_024 * 1_024 * 1_024,
+            action_psi_full_avg10: 5.0,
+        };
+
+        assert!(!policy.permits(pressure(2 * 1_024 * 1_024 * 1_024, 0.0)));
+        assert!(policy.permits(pressure(2 * 1_024 * 1_024 * 1_024, 5.0)));
+        assert!(policy.permits(pressure(1_024 * 1_024 * 1_024, 0.0)));
+
+        let mut disabled = pressure(512 * 1_024 * 1_024, 10.0);
+        disabled.current = MemoryPressureLevel::Normal;
+        assert!(!policy.permits(disabled));
     }
 
     #[test]
@@ -179,18 +247,9 @@ mod tests {
     }
 
     #[test]
-    fn force_termination_requires_opt_in_and_persistent_critical_pressure() {
-        assert!(!force_termination_permitted(
-            MemoryPressureLevel::Critical,
-            false
-        ));
-        assert!(!force_termination_permitted(
-            MemoryPressureLevel::Recovery,
-            true
-        ));
-        assert!(force_termination_permitted(
-            MemoryPressureLevel::Critical,
-            true
-        ));
+    fn force_termination_requires_activation_and_opt_in() {
+        assert!(!force_termination_permitted(true, false));
+        assert!(!force_termination_permitted(false, true));
+        assert!(force_termination_permitted(true, true));
     }
 }

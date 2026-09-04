@@ -21,6 +21,8 @@ recovery_available_percent = 20.0
 [emergency]
 action = "notify_only"
 allow_sigkill = false
+action_available_mib = 1024
+action_psi_full_avg10 = 5.0
 term_grace_seconds = 3
 action_cooldown_seconds = 30
 allowed_names = []

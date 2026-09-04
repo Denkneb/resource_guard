@@ -259,9 +259,16 @@ async fn handle_memory_pressure(
             return MemoryPressureLevel::Normal;
         }
     };
-    state.write().await.record_pressure(evaluation);
+    let activation = settings.emergency_activation_policy();
+    let automatic_action_permitted = activation.permits(evaluation);
+    let permission_changed = state.write().await.record_pressure(
+        evaluation,
+        automatic_action_permitted,
+        activation.action_available_bytes,
+        activation.action_psi_full_avg10,
+    );
 
-    if evaluation.changed() {
+    if evaluation.changed() || permission_changed {
         warn!(
             previous = ?evaluation.previous,
             current = ?evaluation.current,
@@ -269,26 +276,31 @@ async fn handle_memory_pressure(
             swap_used_bytes = evaluation.sample.system.used_swap_bytes,
             psi_some_avg10 = evaluation.sample.psi.some_avg10,
             psi_full_avg10 = evaluation.sample.psi.full_avg10,
+            reason = evaluation.reason(),
+            automatic_action_permitted,
             "system memory pressure changed"
         );
     }
 
     let mut outcome = None;
-    if evaluation.current != MemoryPressureLevel::Critical {
+    if !automatic_action_permitted {
         if pending.take().is_some() {
-            outcome = Some("memory pressure recovered before forceful termination".to_owned());
+            outcome =
+                Some("automatic emergency signal cleared before forceful termination".to_owned());
         }
     } else if pending
         .as_ref()
         .is_some_and(|pending| tokio::time::Instant::now() >= pending.force_at)
     {
         let completed = pending.take().expect("pending emergency was checked above");
-        outcome = Some(finish_pending_emergency(completed, settings, state).await);
+        outcome = Some(
+            finish_pending_emergency(completed, automatic_action_permitted, settings, state).await,
+        );
     }
 
     let scan_due = last_emergency_scan
         .is_none_or(|last| last.elapsed() >= settings.memory_pressure.warning_poll_interval);
-    if evaluation.current == MemoryPressureLevel::Critical
+    if automatic_action_permitted
         && pending.is_none()
         && settings.emergency.action != EmergencyAction::NotifyOnly
         && scan_due
@@ -298,7 +310,7 @@ async fn handle_memory_pressure(
         match inventory.snapshot() {
             Ok(snapshot) => {
                 if let Some(candidate) =
-                    emergency.consider(evaluation.current, &snapshot.processes, now, false)
+                    emergency.consider(automatic_action_permitted, &snapshot.processes, now, false)
                 {
                     outcome = Some(
                         start_emergency_termination(candidate, settings, pending, state).await,
@@ -309,10 +321,20 @@ async fn handle_memory_pressure(
         }
     }
 
-    if (evaluation.changed() && evaluation.current != MemoryPressureLevel::Normal)
+    if ((evaluation.changed() || permission_changed)
+        && evaluation.current != MemoryPressureLevel::Normal)
         || outcome.is_some()
     {
-        send_pressure_notification(evaluation, outcome.as_deref(), notifier, state).await;
+        send_pressure_notification(
+            evaluation,
+            outcome.as_deref(),
+            automatic_action_permitted,
+            activation.action_available_bytes,
+            activation.action_psi_full_avg10,
+            notifier,
+            state,
+        )
+        .await;
     }
 
     evaluation.current
@@ -359,12 +381,13 @@ async fn start_emergency_termination(
 
 async fn finish_pending_emergency(
     pending: PendingEmergency,
+    automatic_action_permitted: bool,
     settings: &crate::application::Settings,
     state: &Arc<RwLock<DaemonState>>,
 ) -> String {
     let identity = pending.candidate.process.identity();
     let outcome = if force_termination_permitted(
-        MemoryPressureLevel::Critical,
+        automatic_action_permitted,
         settings.emergency.allow_sigkill,
     ) {
         let mut source = SysinfoProcessSource::new();
@@ -404,6 +427,9 @@ async fn finish_pending_emergency(
 async fn send_pressure_notification(
     evaluation: crate::domain::MemoryPressureEvaluation,
     outcome: Option<&str>,
+    automatic_action_permitted: bool,
+    action_available_bytes: u64,
+    action_psi_full_avg10: f32,
     notifier: &mut Option<ZbusNotificationSink>,
     state: &Arc<RwLock<DaemonState>>,
 ) {
@@ -411,7 +437,16 @@ async fn send_pressure_notification(
         return;
     };
     if let Err(error) = sink
-        .notify(NotificationRequest::for_pressure(evaluation, outcome), None)
+        .notify(
+            NotificationRequest::for_pressure(
+                evaluation,
+                outcome,
+                automatic_action_permitted,
+                action_available_bytes,
+                action_psi_full_avg10,
+            ),
+            None,
+        )
         .await
     {
         warn!(%error, "memory pressure notification failed");

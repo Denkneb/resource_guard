@@ -183,6 +183,20 @@ pub fn execute(cli: Cli) -> Result<(), CliError> {
                 status.used_swap_bytes, status.total_swap_bytes
             );
             println!("memory pressure: {}", status.memory_pressure_level);
+            println!("memory pressure reason: {}", status.memory_pressure_reason);
+            println!(
+                "automatic emergency action: {}",
+                if status.automatic_emergency_action_permitted {
+                    "permitted"
+                } else {
+                    "blocked"
+                }
+            );
+            println!(
+                "emergency thresholds: {} MiB available or critical RAM with PSI full avg10 >= {:.2}%",
+                status.emergency_action_available_bytes / 1_048_576,
+                status.emergency_action_psi_full_avg10
+            );
             println!(
                 "memory PSI avg10: some {:.2}%, full {:.2}%",
                 status.memory_psi_some_avg10, status.memory_psi_full_avg10

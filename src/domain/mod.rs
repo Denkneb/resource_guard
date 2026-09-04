@@ -6,12 +6,12 @@ mod resources;
 mod violation;
 
 pub use emergency::{
-    EmergencyAction, EmergencyCandidate, EmergencyPolicy, force_termination_permitted,
-    select_emergency_victim,
+    EmergencyAction, EmergencyActivationPolicy, EmergencyCandidate, EmergencyPolicy,
+    force_termination_permitted, select_emergency_victim,
 };
 pub use memory_pressure::{
     MemoryPressureEvaluation, MemoryPressureLevel, MemoryPressurePolicy, MemoryPressureSample,
-    MemoryPressureTracker, MemoryPsi,
+    MemoryPressureSignals, MemoryPressureTracker, MemoryPsi,
 };
 pub use policy::{IgnoreRegistry, IgnoreRule, ProcessDisposition, ProtectionPolicy};
 pub use process::{ProcessDescriptor, ProcessIdentity};

@@ -7,6 +7,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed
+
+- Separated critical-pressure reporting from automatic process termination so full swap and low-but-unstalled RAM no longer terminate allowlisted applications.
+- Added configurable available-memory and PSI thresholds for automatic emergency actions, including status, notification, and log diagnostics.
+
 ## [0.2.1] - 2026-08-28
 
 ### Fixed

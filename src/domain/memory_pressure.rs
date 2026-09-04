@@ -63,6 +63,7 @@ pub struct MemoryPressureEvaluation {
     pub previous: MemoryPressureLevel,
     pub current: MemoryPressureLevel,
     pub sample: MemoryPressureSample,
+    pub signals: MemoryPressureSignals,
 }
 
 impl MemoryPressureEvaluation {
@@ -70,6 +71,38 @@ impl MemoryPressureEvaluation {
     pub fn changed(self) -> bool {
         self.previous != self.current
     }
+
+    #[must_use]
+    pub fn reason(self) -> &'static str {
+        if self.signals.emergency_floor {
+            "emergency_available_memory"
+        } else if self.signals.available_critical && self.signals.psi_critical {
+            "low_available_memory_and_psi"
+        } else if self.signals.available_critical && self.signals.swap_critical {
+            "low_available_memory_and_full_swap"
+        } else if self.signals.available_warning {
+            "low_available_memory"
+        } else if self.signals.psi_critical {
+            "memory_psi"
+        } else if self.current == MemoryPressureLevel::Critical {
+            "recovery_hysteresis"
+        } else {
+            "none"
+        }
+    }
+}
+
+// These flags preserve the independently configured threshold signals in one
+// evaluation so downstream policy can explain and act on the same sample.
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct MemoryPressureSignals {
+    pub available_warning: bool,
+    pub available_critical: bool,
+    pub available_recovered: bool,
+    pub swap_critical: bool,
+    pub psi_critical: bool,
+    pub emergency_floor: bool,
 }
 
 #[derive(Debug)]
@@ -96,29 +129,38 @@ impl MemoryPressureTracker {
 
     pub fn evaluate(&mut self, sample: MemoryPressureSample) -> MemoryPressureEvaluation {
         let previous = self.level;
-        self.level = self.next_level(sample);
+        let signals = self.signals(sample);
+        self.level = self.next_level(signals);
         MemoryPressureEvaluation {
             previous,
             current: self.level,
             sample,
+            signals,
         }
     }
 
-    fn next_level(&mut self, sample: MemoryPressureSample) -> MemoryPressureLevel {
+    fn signals(&self, sample: MemoryPressureSample) -> MemoryPressureSignals {
+        let available_percent = sample.available_percent();
+        MemoryPressureSignals {
+            available_warning: available_percent <= self.policy.warning_available_percent,
+            available_critical: available_percent <= self.policy.critical_available_percent,
+            available_recovered: available_percent >= self.policy.recovery_available_percent,
+            swap_critical: sample.system.total_swap_bytes > 0
+                && sample.swap_used_percent() >= self.policy.critical_swap_used_percent,
+            psi_critical: sample.psi.full_avg10 >= self.policy.critical_psi_full_avg10,
+            emergency_floor: sample.system.available_memory_bytes
+                <= self.policy.emergency_available_bytes,
+        }
+    }
+
+    fn next_level(&mut self, signals: MemoryPressureSignals) -> MemoryPressureLevel {
         if !self.policy.enabled {
             self.critical_samples = 0;
             return MemoryPressureLevel::Normal;
         }
 
-        let available_percent = sample.available_percent();
-        let swap_critical = sample.system.total_swap_bytes > 0
-            && sample.swap_used_percent() >= self.policy.critical_swap_used_percent;
-        let psi_critical = sample.psi.full_avg10 >= self.policy.critical_psi_full_avg10;
-        let emergency_floor =
-            sample.system.available_memory_bytes <= self.policy.emergency_available_bytes;
-        let critical_signal = emergency_floor
-            || (available_percent <= self.policy.critical_available_percent
-                && (swap_critical || psi_critical));
+        let critical_signal = signals.emergency_floor
+            || (signals.available_critical && (signals.swap_critical || signals.psi_critical));
 
         if critical_signal {
             self.critical_samples = self.critical_samples.saturating_add(1);
@@ -127,20 +169,17 @@ impl MemoryPressureTracker {
         }
 
         if self.level == MemoryPressureLevel::Critical {
-            if available_percent >= self.policy.recovery_available_percent && !psi_critical {
+            if signals.available_recovered && !signals.psi_critical {
                 return MemoryPressureLevel::Recovery;
             }
             return MemoryPressureLevel::Critical;
         }
 
-        if emergency_floor || self.critical_samples >= self.policy.critical_samples {
+        if signals.emergency_floor || self.critical_samples >= self.policy.critical_samples {
             return MemoryPressureLevel::Critical;
         }
 
-        if critical_signal
-            || available_percent <= self.policy.warning_available_percent
-            || psi_critical
-        {
+        if critical_signal || signals.available_warning || signals.psi_critical {
             return MemoryPressureLevel::Warning;
         }
 

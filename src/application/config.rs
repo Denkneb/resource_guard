@@ -1,8 +1,8 @@
 use std::{error::Error, fmt, path::PathBuf, time::Duration};
 
 use crate::domain::{
-    EmergencyAction, EmergencyPolicy, IgnoreRule, MemoryPressurePolicy, ProtectionPolicy,
-    Thresholds, ViolationPolicy,
+    EmergencyAction, EmergencyActivationPolicy, EmergencyPolicy, IgnoreRule, MemoryPressurePolicy,
+    ProtectionPolicy, Thresholds, ViolationPolicy,
 };
 
 const BYTES_PER_MIB: u64 = 1_048_576;
@@ -72,6 +72,15 @@ impl Settings {
         }
         if self.emergency.action_cooldown.is_zero() {
             return Err(ConfigValidationError::ZeroEmergencyCooldown);
+        }
+        if self.emergency.action_available_bytes == 0 {
+            return Err(ConfigValidationError::ZeroEmergencyActionMemory);
+        }
+        if !self.emergency.action_psi_full_avg10.is_finite()
+            || self.emergency.action_psi_full_avg10 < 0.0
+            || self.emergency.action_psi_full_avg10 > 100.0
+        {
+            return Err(ConfigValidationError::InvalidEmergencyPsiThreshold);
         }
         if self.termination.grace_period.is_zero() {
             return Err(ConfigValidationError::ZeroGracePeriod);
@@ -157,6 +166,14 @@ impl Settings {
         }
     }
 
+    #[must_use]
+    pub const fn emergency_activation_policy(&self) -> EmergencyActivationPolicy {
+        EmergencyActivationPolicy {
+            action_available_bytes: self.emergency.action_available_bytes,
+            action_psi_full_avg10: self.emergency.action_psi_full_avg10,
+        }
+    }
+
     pub fn add_ignore_rule(&mut self, rule: IgnoreRule) {
         match rule {
             IgnoreRule::Name(name) => {
@@ -212,6 +229,8 @@ impl Default for MemoryPressureSettings {
 pub struct EmergencySettings {
     pub action: EmergencyAction,
     pub allow_sigkill: bool,
+    pub action_available_bytes: u64,
+    pub action_psi_full_avg10: f32,
     pub term_grace_period: Duration,
     pub action_cooldown: Duration,
     pub allowed_names: Vec<String>,
@@ -225,6 +244,8 @@ impl Default for EmergencySettings {
         Self {
             action: EmergencyAction::NotifyOnly,
             allow_sigkill: false,
+            action_available_bytes: 1_024 * BYTES_PER_MIB,
+            action_psi_full_avg10: 5.0,
             term_grace_period: Duration::from_secs(3),
             action_cooldown: Duration::from_secs(30),
             allowed_names: Vec::new(),
@@ -319,6 +340,8 @@ pub enum ConfigValidationError {
     ZeroPressurePollInterval,
     ZeroEmergencyGracePeriod,
     ZeroEmergencyCooldown,
+    ZeroEmergencyActionMemory,
+    InvalidEmergencyPsiThreshold,
     ZeroGracePeriod,
     ZeroNotificationTimeout,
     RelativeExecutable(PathBuf),
@@ -378,6 +401,18 @@ impl fmt::Display for ConfigValidationError {
                 write!(
                     formatter,
                     "emergency action cooldown must be greater than zero"
+                )
+            }
+            Self::ZeroEmergencyActionMemory => {
+                write!(
+                    formatter,
+                    "emergency action available memory must be greater than zero"
+                )
+            }
+            Self::InvalidEmergencyPsiThreshold => {
+                write!(
+                    formatter,
+                    "emergency action PSI threshold must be finite and within 0..=100"
                 )
             }
             Self::ZeroGracePeriod => write!(formatter, "grace period must be greater than zero"),
@@ -452,6 +487,39 @@ mod tests {
         assert_eq!(
             settings.violation_policy().minimum_duration,
             Duration::from_secs(10)
+        );
+        assert_eq!(
+            settings
+                .emergency_activation_policy()
+                .action_available_bytes,
+            1_024 * 1_024 * 1_024
+        );
+        assert!(
+            (settings.emergency_activation_policy().action_psi_full_avg10 - 5.0).abs()
+                < f32::EPSILON
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_emergency_action_thresholds() {
+        let mut settings = Settings::default();
+        settings.emergency.action_available_bytes = 0;
+        assert_eq!(
+            settings.validate(),
+            Err(ConfigValidationError::ZeroEmergencyActionMemory)
+        );
+
+        settings.emergency.action_available_bytes = 1;
+        settings.emergency.action_psi_full_avg10 = f32::NAN;
+        assert_eq!(
+            settings.validate(),
+            Err(ConfigValidationError::InvalidEmergencyPsiThreshold)
+        );
+
+        settings.emergency.action_psi_full_avg10 = 101.0;
+        assert_eq!(
+            settings.validate(),
+            Err(ConfigValidationError::InvalidEmergencyPsiThreshold)
         );
     }
 

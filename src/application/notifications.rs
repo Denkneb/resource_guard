@@ -132,15 +132,29 @@ impl NotificationRequest {
     }
 
     #[must_use]
-    pub fn for_pressure(evaluation: MemoryPressureEvaluation, outcome: Option<&str>) -> Self {
+    pub fn for_pressure(
+        evaluation: MemoryPressureEvaluation,
+        outcome: Option<&str>,
+        automatic_action_permitted: bool,
+        action_available_bytes: u64,
+        action_psi_full_avg10: f32,
+    ) -> Self {
         let sample = evaluation.sample;
         let mut body = format!(
-            "Available RAM: {} MiB ({:.1}%)\nSwap used: {:.1}%\nPSI some/full avg10: {:.2}% / {:.2}%",
+            "Available RAM: {} MiB ({:.1}%)\nSwap used: {:.1}%\nPSI some/full avg10: {:.2}% / {:.2}%\nReason: {}\nAutomatic action: {}\nAction threshold: {} MiB or critical RAM with PSI full avg10 >= {:.2}%",
             sample.system.available_memory_bytes / 1_048_576,
             sample.available_percent(),
             sample.swap_used_percent(),
             sample.psi.some_avg10,
             sample.psi.full_avg10,
+            evaluation.reason(),
+            if automatic_action_permitted {
+                "permitted"
+            } else {
+                "blocked"
+            },
+            action_available_bytes / 1_048_576,
+            action_psi_full_avg10,
         );
         if let Some(outcome) = outcome {
             let _ = write!(body, "\nAction: {}", escape_markup(outcome));
@@ -368,12 +382,24 @@ mod tests {
                         full_avg10: 5.0,
                     },
                 },
+                signals: crate::domain::MemoryPressureSignals {
+                    available_warning: true,
+                    available_critical: true,
+                    available_recovered: false,
+                    swap_critical: false,
+                    psi_critical: true,
+                    emergency_floor: true,
+                },
             },
             Some("SIGTERM sent to worker (42)"),
+            true,
+            1_024 * 1_024,
+            5.0,
         );
 
         assert!(request.summary().contains("Critical"));
         assert!(request.body().contains("Action: SIGTERM sent"));
+        assert!(request.body().contains("Automatic action: permitted"));
         assert!(!request.has_actions());
     }
 

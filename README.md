@@ -129,6 +129,8 @@ To terminate only explicitly approved applications during persistent critical pr
 [emergency]
 action = "terminate_allowlisted"
 allow_sigkill = false
+action_available_mib = 1024
+action_psi_full_avg10 = 5.0
 allowed_names = []
 allowed_executables = ["/absolute/path/to/a/restartable-worker"]
 exempt_names = ["resource-guard"]
@@ -137,7 +139,9 @@ exempt_executables = []
 
 `terminate_largest_unprotected` is a more aggressive explicit opt-in. It selects the largest eligible process owned by the current user. Protected and emergency-exempt processes are never candidates. Ordinary ignored processes remain eligible because ignoring routine notifications is not an emergency safety guarantee.
 
-Emergency actions revalidate PID, UID, and process start time before every signal. Resource Guard first sends `SIGTERM`, waits for the configured grace period, and checks that system pressure is still critical. It can send `SIGKILL` only when `allow_sigkill = true`; this is disabled by default. Only one process is handled at a time, followed by an action cooldown.
+Critical pressure and permission to terminate are separate decisions. Full swap combined with RAM below `critical_available_percent` can produce a critical warning and faster polling, but automatic action is permitted only when available RAM reaches `action_available_mib`, or when RAM is critically low and PSI full avg10 reaches `action_psi_full_avg10`. Both automatic-action thresholds are configurable under `[emergency]`.
+
+Emergency actions revalidate PID, UID, and process start time before every signal. Resource Guard first sends `SIGTERM`, waits for the configured grace period, and checks that the automatic-action condition still holds. It can send `SIGKILL` only when `allow_sigkill = true`; this is disabled by default. Only one process is handled at a time, followed by an action cooldown.
 
 The emergency floor can enter the critical state immediately. Other critical conditions require the configured number of consecutive samples. Recovery uses a higher available-memory threshold to prevent rapid state oscillation. See [`config.example.toml`](config.example.toml) for all pressure thresholds and intervals.
 

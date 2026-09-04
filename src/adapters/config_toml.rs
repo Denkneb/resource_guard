@@ -293,6 +293,8 @@ enum EmergencyActionDocument {
 struct EmergencyDocument {
     action: EmergencyActionDocument,
     allow_sigkill: bool,
+    action_available_mib: u64,
+    action_psi_full_avg10: f32,
     term_grace_seconds: u64,
     action_cooldown_seconds: u64,
     allowed_names: Vec<String>,
@@ -400,6 +402,11 @@ impl From<ConfigDocument> for Settings {
             emergency: EmergencySettings {
                 action: EmergencyAction::from(document.emergency.action),
                 allow_sigkill: document.emergency.allow_sigkill,
+                action_available_bytes: document
+                    .emergency
+                    .action_available_mib
+                    .saturating_mul(BYTES_PER_MIB),
+                action_psi_full_avg10: document.emergency.action_psi_full_avg10,
                 term_grace_period: Duration::from_secs(document.emergency.term_grace_seconds),
                 action_cooldown: Duration::from_secs(document.emergency.action_cooldown_seconds),
                 allowed_names: document.emergency.allowed_names,
@@ -481,6 +488,8 @@ impl From<&EmergencySettings> for EmergencyDocument {
         Self {
             action: settings.action.into(),
             allow_sigkill: settings.allow_sigkill,
+            action_available_mib: settings.action_available_bytes / BYTES_PER_MIB,
+            action_psi_full_avg10: settings.action_psi_full_avg10,
             term_grace_seconds: settings.term_grace_period.as_secs(),
             action_cooldown_seconds: settings.action_cooldown.as_secs(),
             allowed_names: settings.allowed_names.clone(),
@@ -608,7 +617,7 @@ mod tests {
         let path = directory.path().join("config.toml");
         fs::write(
             &path,
-            "[emergency]\naction = \"terminate_allowlisted\"\nallowed_names = [\"worker\"]\n",
+            "[emergency]\naction = \"terminate_allowlisted\"\naction_available_mib = 768\naction_psi_full_avg10 = 2.5\nallowed_names = [\"worker\"]\n",
         )
         .unwrap();
         let repository = TomlConfigRepository::new(path);
@@ -620,6 +629,25 @@ mod tests {
             crate::domain::EmergencyAction::TerminateAllowlisted
         );
         assert_eq!(settings.emergency.allowed_names, vec!["worker"]);
+        assert_eq!(settings.emergency.action_available_bytes, 768 * 1_048_576);
+        assert!((settings.emergency.action_psi_full_avg10 - 2.5).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn loads_legacy_emergency_policy_with_new_threshold_defaults() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        fs::write(
+            &path,
+            "[emergency]\naction = \"terminate_allowlisted\"\nallowed_names = [\"worker\"]\n",
+        )
+        .unwrap();
+        let repository = TomlConfigRepository::new(path);
+
+        let settings = repository.load().unwrap().settings;
+
+        assert_eq!(settings.emergency.action_available_bytes, 1_024 * 1_048_576);
+        assert!((settings.emergency.action_psi_full_avg10 - 5.0).abs() < f32::EPSILON);
     }
 
     #[test]

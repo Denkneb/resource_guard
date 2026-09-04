@@ -96,6 +96,9 @@ fn status_reports_running_daemon_and_secure_socket_permissions() {
     assert!(stdout.contains("daemon: running"));
     assert!(stdout.contains("processes:"));
     assert!(stdout.contains("memory pressure:"));
+    assert!(stdout.contains("memory pressure reason:"));
+    assert!(stdout.contains("automatic emergency action:"));
+    assert!(stdout.contains("emergency thresholds:"));
     assert!(stdout.contains("memory PSI avg10:"));
     assert!(stdout.contains("notification error:"));
 
