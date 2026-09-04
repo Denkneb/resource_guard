@@ -272,17 +272,17 @@ async fn adapter_navigates_and_reports_closure_over_a_private_dbus() {
     assert!(sink.supports_persistence());
 
     let summary = NotificationBinding::new(monitor_event(), NotificationView::Summary);
-    let identity = summary.event().process.identity();
+    let identity = summary.event().unwrap().process.identity();
     let id = sink.notify(summary.request(), None).await.unwrap();
     let details = summary
         .transition(emitted_action(&server, &mut events, id, "details").await)
         .unwrap();
-    assert_eq!(details.event().process.identity(), identity);
+    assert_eq!(details.event().unwrap().process.identity(), identity);
     assert_eq!(sink.notify(details.request(), Some(id)).await.unwrap(), id);
     let restored = details
         .transition(emitted_action(&server, &mut events, id, "back").await)
         .unwrap();
-    assert_eq!(restored.event().process.identity(), identity);
+    assert_eq!(restored.event().unwrap().process.identity(), identity);
     assert_eq!(sink.notify(restored.request(), Some(id)).await.unwrap(), id);
     sink.close(id).await.unwrap();
 

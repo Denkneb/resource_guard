@@ -1,11 +1,11 @@
 use std::time::Instant;
 
 use crate::application::MonitorReport;
-use crate::domain::{MemoryPressureEvaluation, MemoryPressureLevel};
+use crate::domain::{MemoryPressureEvaluation, MemoryPressureLevel, StaleWorkload};
 
 use super::{
     StatusResponse,
-    protocol::{TopProcess, TopResponse},
+    protocol::{StaleResponse, StaleWorkloadSummary, TopProcess, TopResponse},
 };
 
 #[derive(Debug)]
@@ -30,6 +30,7 @@ pub(crate) struct DaemonState {
     processes: Vec<TopProcess>,
     last_error: Option<String>,
     notification_error: Option<String>,
+    stale_workloads: Vec<StaleWorkloadSummary>,
 }
 
 impl DaemonState {
@@ -55,6 +56,7 @@ impl DaemonState {
             processes: Vec::new(),
             last_error: None,
             notification_error: None,
+            stale_workloads: Vec::new(),
         }
     }
 
@@ -148,6 +150,30 @@ impl DaemonState {
 
     pub(crate) fn record_notification_error(&mut self, error: impl Into<String>) {
         self.notification_error = Some(error.into());
+    }
+
+    pub(crate) const fn pressure_level(&self) -> MemoryPressureLevel {
+        self.memory_pressure_level
+    }
+
+    pub(crate) fn record_stale_workloads(&mut self, workloads: &[StaleWorkload]) {
+        self.stale_workloads = workloads
+            .iter()
+            .map(|workload| StaleWorkloadSummary {
+                root_pid: workload.identity().pid(),
+                name: workload.root.name().to_owned(),
+                process_count: workload.process_count(),
+                total_memory_bytes: workload.total_memory_bytes,
+                total_cpu_percent: workload.total_cpu_percent,
+                age_seconds: workload.age.as_secs(),
+            })
+            .collect();
+    }
+
+    pub(crate) fn stale(&self) -> StaleResponse {
+        StaleResponse {
+            workloads: self.stale_workloads.clone(),
+        }
     }
 
     pub(crate) fn clear_notification_error(&mut self) {

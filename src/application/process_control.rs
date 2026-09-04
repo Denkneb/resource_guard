@@ -1,6 +1,6 @@
 use std::{error::Error, fmt, time::Duration};
 
-use crate::domain::{ProcessDisposition, ProcessIdentity, ProtectionPolicy};
+use crate::domain::{ProcessDisposition, ProcessIdentity, ProtectionPolicy, StaleWorkload};
 
 use super::{
     ForceTerminationPort, MonotonicClock, PortError, ProcessSource, Sleeper, TerminationPort,
@@ -73,6 +73,56 @@ pub struct ForceStopProcess<'a, S, T> {
     terminator: &'a mut T,
     current_uid: u32,
     protection: &'a ProtectionPolicy,
+}
+
+pub struct StopWorkload<'a, S, T> {
+    source: &'a mut S,
+    terminator: &'a mut T,
+    current_uid: u32,
+    protection: &'a ProtectionPolicy,
+}
+
+impl<'a, S, T> StopWorkload<'a, S, T>
+where
+    S: ProcessSource,
+    T: TerminationPort,
+{
+    pub fn new(
+        source: &'a mut S,
+        terminator: &'a mut T,
+        current_uid: u32,
+        protection: &'a ProtectionPolicy,
+    ) -> Self {
+        Self {
+            source,
+            terminator,
+            current_uid,
+            protection,
+        }
+    }
+
+    /// Revalidates every identity and sends SIGTERM leaf-first, ending with the root.
+    ///
+    /// # Errors
+    /// Returns the first ownership, identity, protection, inspection, or signalling error.
+    pub fn execute(&mut self, workload: &StaleWorkload) -> Result<usize, StopError> {
+        let mut signalled = 0;
+        for identity in workload.termination_order() {
+            match StopProcess::new(
+                self.source,
+                self.terminator,
+                self.current_uid,
+                self.protection,
+            )
+            .execute(identity)
+            {
+                Ok(()) => signalled += 1,
+                Err(StopError::NotFound { .. }) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(signalled)
+    }
 }
 
 pub struct WaitForExit<'a, S, C, D> {
@@ -286,15 +336,24 @@ fn validate_process<S: ProcessSource>(
 
 #[cfg(test)]
 mod tests {
-    use std::{cell::Cell, collections::VecDeque, path::PathBuf, rc::Rc, time::Duration};
+    use std::{
+        cell::Cell,
+        collections::{HashMap, VecDeque},
+        path::PathBuf,
+        rc::Rc,
+        time::Duration,
+    };
 
-    use super::{ForceStopProcess, StopAndWait, StopError, StopOutcome, StopProcess};
+    use super::{ForceStopProcess, StopAndWait, StopError, StopOutcome, StopProcess, StopWorkload};
     use crate::{
         application::{
             ForceTerminationPort, MonotonicClock, PortError, ProcessSource, ResourceSnapshot,
             Sleeper, TerminationPort,
         },
-        domain::{ProcessDescriptor, ProcessIdentity, ProtectionPolicy},
+        domain::{
+            ProcessDescriptor, ProcessIdentity, ProcessResources, ProtectionPolicy, StaleWorkload,
+            WorkloadMember,
+        },
     };
 
     const CURRENT_UID: u32 = 1_000;
@@ -392,6 +451,72 @@ mod tests {
 
         assert_eq!(result, Ok(()));
         assert_eq!(terminator.terminated, vec![identity]);
+    }
+
+    #[test]
+    fn stops_a_workload_leaf_first_after_revalidating_every_identity() {
+        struct TreeSource(HashMap<u32, ProcessDescriptor>);
+        impl ProcessSource for TreeSource {
+            fn snapshot(&mut self) -> Result<ResourceSnapshot, PortError> {
+                unreachable!("snapshot is not used by the stop use case")
+            }
+
+            fn find(&mut self, pid: u32) -> Result<Option<ProcessDescriptor>, PortError> {
+                Ok(self.0.get(&pid).cloned())
+            }
+        }
+
+        let root = descriptor(ProcessIdentity::new(10, CURRENT_UID, 10), "uv");
+        let child = descriptor(ProcessIdentity::new(11, CURRENT_UID, 11), "pytest");
+        let resources = ProcessResources {
+            cpu_percent: 0.0,
+            resident_memory_bytes: 100,
+            virtual_memory_bytes: 100,
+            running_for: Duration::from_hours(1),
+            observed_at: Duration::ZERO,
+        };
+        let workload = StaleWorkload {
+            root: root.clone(),
+            members: vec![
+                WorkloadMember {
+                    process: root.clone(),
+                    resources,
+                    depth: 0,
+                },
+                WorkloadMember {
+                    process: child.clone(),
+                    resources,
+                    depth: 1,
+                },
+            ],
+            total_memory_bytes: 200,
+            total_cpu_percent: 0.0,
+            age: Duration::from_hours(1),
+        };
+        let mut source = TreeSource(HashMap::from([
+            (root.identity().pid(), root),
+            (child.identity().pid(), child),
+        ]));
+        let mut terminator = FakeTerminator::default();
+
+        let count = StopWorkload::new(
+            &mut source,
+            &mut terminator,
+            CURRENT_UID,
+            &ProtectionPolicy::default(),
+        )
+        .execute(&workload)
+        .unwrap();
+
+        assert_eq!(count, 2);
+        assert_eq!(
+            terminator
+                .terminated
+                .into_iter()
+                .map(ProcessIdentity::pid)
+                .collect::<Vec<_>>(),
+            vec![11, 10]
+        );
     }
 
     #[test]

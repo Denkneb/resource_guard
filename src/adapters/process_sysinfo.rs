@@ -10,7 +10,7 @@ use sysinfo::{
 
 use crate::{
     application::{ObservedProcess, PortError, ProcessSource, ResourceSnapshot},
-    domain::{ProcessDescriptor, ProcessIdentity, ProcessResources, SystemResources},
+    domain::{ProcessDescriptor, ProcessIdentity, ProcessResources, ProcessState, SystemResources},
 };
 
 use super::procfs::read_process_identity;
@@ -52,6 +52,10 @@ impl SysinfoProcessSource {
                 ProcessIdentity::new(pid, uid, started_at),
                 process.name().to_string_lossy(),
                 process.exe().map(PathBuf::from),
+            )
+            .with_runtime(
+                process.parent().map(Pid::as_u32),
+                process_state(process.status()),
             ),
             resources: ProcessResources {
                 cpu_percent: process.cpu_usage(),
@@ -72,6 +76,16 @@ impl SysinfoProcessSource {
             process.name().to_string_lossy(),
             process.exe().map(PathBuf::from),
         ))
+    }
+}
+
+const fn process_state(status: ProcessStatus) -> ProcessState {
+    match status {
+        ProcessStatus::Run => ProcessState::Running,
+        ProcessStatus::Sleep | ProcessStatus::Idle => ProcessState::Sleeping,
+        ProcessStatus::UninterruptibleDiskSleep => ProcessState::Uninterruptible,
+        ProcessStatus::Zombie | ProcessStatus::Dead => ProcessState::Zombie,
+        _ => ProcessState::Other,
     }
 }
 

@@ -41,6 +41,18 @@ pub struct ProcessDescriptor {
     identity: ProcessIdentity,
     name: String,
     executable: Option<PathBuf>,
+    parent_pid: Option<u32>,
+    state: ProcessState,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ProcessState {
+    Running,
+    Sleeping,
+    Uninterruptible,
+    Zombie,
+    #[default]
+    Other,
 }
 
 impl ProcessDescriptor {
@@ -54,7 +66,16 @@ impl ProcessDescriptor {
             identity,
             name: name.into(),
             executable,
+            parent_pid: None,
+            state: ProcessState::Other,
         }
+    }
+
+    #[must_use]
+    pub const fn with_runtime(mut self, parent_pid: Option<u32>, state: ProcessState) -> Self {
+        self.parent_pid = parent_pid;
+        self.state = state;
+        self
     }
 
     #[must_use]
@@ -70,6 +91,16 @@ impl ProcessDescriptor {
     #[must_use]
     pub fn executable(&self) -> Option<&std::path::Path> {
         self.executable.as_deref()
+    }
+
+    #[must_use]
+    pub const fn parent_pid(&self) -> Option<u32> {
+        self.parent_pid
+    }
+
+    #[must_use]
+    pub const fn state(&self) -> ProcessState {
+        self.state
     }
 }
 

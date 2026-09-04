@@ -7,6 +7,19 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-04
+
+### Added
+
+- Added configurable detection of old, low-CPU developer-tool workload trees during system memory pressure.
+- Added actionable workload notifications with details, temporary ignore, persistent ignore, and safe leaf-first `SIGTERM`.
+- Added daemon-backed `stale` inspection and an exact-PID-confirmed `stop-tree` command.
+
+### Changed
+
+- Process snapshots now retain parent PID and Linux process state for workload analysis.
+- Raised the minimum supported Rust version to 1.98.
+
 ## [0.2.2] - 2026-09-04
 
 ### Fixed
@@ -55,7 +68,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - Unit, adapter, CLI, process-signalling, packaging, and resource-baseline tests.
 - CI, dependency policy checks, Dependabot, and local pre-commit/pre-push hooks.
 
-[Unreleased]: https://github.com/Denkneb/resource_guard/compare/v0.2.2...HEAD
+[Unreleased]: https://github.com/Denkneb/resource_guard/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/Denkneb/resource_guard/compare/v0.2.2...v0.3.0
 [0.2.2]: https://github.com/Denkneb/resource_guard/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/Denkneb/resource_guard/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/Denkneb/resource_guard/compare/v0.1.1...v0.2.0

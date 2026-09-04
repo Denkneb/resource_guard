@@ -3,6 +3,7 @@ mod memory_pressure;
 mod policy;
 mod process;
 mod resources;
+mod stale_workload;
 mod violation;
 
 pub use emergency::{
@@ -14,6 +15,7 @@ pub use memory_pressure::{
     MemoryPressureSignals, MemoryPressureTracker, MemoryPsi,
 };
 pub use policy::{IgnoreRegistry, IgnoreRule, ProcessDisposition, ProtectionPolicy};
-pub use process::{ProcessDescriptor, ProcessIdentity};
+pub use process::{ProcessDescriptor, ProcessIdentity, ProcessState};
 pub use resources::{ProcessResources, ResourceBreach, SystemResources, Thresholds};
+pub use stale_workload::{StaleWorkload, StaleWorkloadPolicy, WorkloadMember};
 pub use violation::{Evaluation, ViolationPolicy, ViolationTracker};

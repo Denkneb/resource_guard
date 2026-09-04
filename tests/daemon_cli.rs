@@ -202,6 +202,20 @@ fn top_fails_when_daemon_is_absent() {
 }
 
 #[test]
+fn stale_reports_an_empty_snapshot_when_pressure_is_normal() {
+    let directory = tempfile::tempdir().unwrap();
+    let _daemon = start_daemon(&directory);
+
+    let output = isolated_command(&directory).arg("stale").output().unwrap();
+
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap().trim(),
+        "no stale workloads detected"
+    );
+}
+
+#[test]
 fn top_watch_renders_the_terminal_view() {
     let directory = tempfile::tempdir().unwrap();
     let _daemon = start_daemon(&directory);

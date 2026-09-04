@@ -4,7 +4,7 @@ use std::{
     future::Future,
 };
 
-use crate::domain::MemoryPressureEvaluation;
+use crate::domain::{MemoryPressureEvaluation, StaleWorkload};
 
 use super::{MonitorEvent, PortError};
 
@@ -168,6 +168,38 @@ impl NotificationRequest {
     }
 
     #[must_use]
+    pub fn for_stale_workload(workload: &StaleWorkload, view: NotificationView) -> Self {
+        let mut body = format!(
+            "Processes: {}\nTree RAM: {} MiB\nTree CPU: {:.1}%\nAge: {}s\nReason: long-lived low-CPU workload under memory pressure",
+            workload.process_count(),
+            workload.total_memory_bytes / 1_048_576,
+            workload.total_cpu_percent,
+            workload.age.as_secs(),
+        );
+        if view == NotificationView::Details {
+            let executable = workload.root.executable().map_or_else(
+                || "unknown".to_owned(),
+                |path| escape_markup(&path.display().to_string()),
+            );
+            let _ = write!(
+                body,
+                "\nRoot PID: {}\nExecutable: {executable}\nStop affects only this workload tree; parent sessions are preserved",
+                workload.identity().pid()
+            );
+        }
+        Self {
+            summary: format!(
+                "Suspected stale workload: {} ({})",
+                workload.root.name(),
+                workload.identity().pid()
+            ),
+            body,
+            actions: true,
+            view,
+        }
+    }
+
+    #[must_use]
     pub const fn has_actions(&self) -> bool {
         self.actions
     }
@@ -185,19 +217,47 @@ impl NotificationRequest {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct NotificationBinding {
-    event: MonitorEvent,
+    subject: NotificationSubject,
     view: NotificationView,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum NotificationSubject {
+    Process(MonitorEvent),
+    Workload(StaleWorkload),
 }
 
 impl NotificationBinding {
     #[must_use]
     pub const fn new(event: MonitorEvent, view: NotificationView) -> Self {
-        Self { event, view }
+        Self {
+            subject: NotificationSubject::Process(event),
+            view,
+        }
     }
 
     #[must_use]
-    pub const fn event(&self) -> &MonitorEvent {
-        &self.event
+    pub const fn for_workload(workload: StaleWorkload, view: NotificationView) -> Self {
+        Self {
+            subject: NotificationSubject::Workload(workload),
+            view,
+        }
+    }
+
+    #[must_use]
+    pub const fn event(&self) -> Option<&MonitorEvent> {
+        match &self.subject {
+            NotificationSubject::Process(event) => Some(event),
+            NotificationSubject::Workload(_) => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn workload(&self) -> Option<&StaleWorkload> {
+        match &self.subject {
+            NotificationSubject::Workload(workload) => Some(workload),
+            NotificationSubject::Process(_) => None,
+        }
     }
 
     #[must_use]
@@ -207,7 +267,12 @@ impl NotificationBinding {
 
     #[must_use]
     pub fn request(&self) -> NotificationRequest {
-        NotificationRequest::for_view(&self.event, self.view)
+        match &self.subject {
+            NotificationSubject::Process(event) => NotificationRequest::for_view(event, self.view),
+            NotificationSubject::Workload(workload) => {
+                NotificationRequest::for_stale_workload(workload, self.view)
+            }
+        }
     }
 
     #[must_use]
@@ -217,7 +282,10 @@ impl NotificationBinding {
             (NotificationView::Details, NotificationAction::Back) => NotificationView::Summary,
             _ => return None,
         };
-        Some(Self::new(self.event.clone(), view))
+        Some(Self {
+            subject: self.subject.clone(),
+            view,
+        })
     }
 }
 
@@ -306,7 +374,8 @@ mod tests {
         application::{MonitorEvent, PortError},
         domain::{
             MemoryPressureEvaluation, MemoryPressureLevel, MemoryPressureSample, MemoryPsi,
-            ProcessDescriptor, ProcessIdentity, ProcessResources, ResourceBreach, SystemResources,
+            ProcessDescriptor, ProcessIdentity, ProcessResources, ResourceBreach, StaleWorkload,
+            SystemResources, WorkloadMember,
         },
     };
 
@@ -332,6 +401,21 @@ mod tests {
         }
     }
 
+    fn workload() -> StaleWorkload {
+        let event = event();
+        StaleWorkload {
+            root: event.process.clone(),
+            members: vec![WorkloadMember {
+                process: event.process,
+                resources: event.resources,
+                depth: 0,
+            }],
+            total_memory_bytes: 256 * 1_048_576,
+            total_cpu_percent: 0.2,
+            age: Duration::from_hours(2),
+        }
+    }
+
     #[test]
     fn builds_a_safe_human_readable_message() {
         let request = NotificationRequest::from_event(&event());
@@ -348,6 +432,26 @@ mod tests {
 
         assert!(request.body().contains("Executable: /usr/bin/worker"));
         assert!(request.body().contains("Runtime: 90s"));
+    }
+
+    #[test]
+    fn stale_workload_notification_keeps_tree_identity_across_navigation() {
+        let summary = NotificationBinding::for_workload(workload(), NotificationView::Summary);
+        assert!(
+            summary
+                .request()
+                .summary()
+                .contains("Suspected stale workload")
+        );
+        let details = summary.transition(NotificationAction::Details).unwrap();
+        assert_eq!(details.workload().unwrap().identity().pid(), 42);
+        assert!(
+            details
+                .request()
+                .body()
+                .contains("parent sessions are preserved")
+        );
+        assert!(details.transition(NotificationAction::Back).is_some());
     }
 
     #[test]
@@ -443,16 +547,16 @@ mod tests {
     #[test]
     fn navigates_from_summary_to_details_and_back_for_the_same_process() {
         let summary = NotificationBinding::new(event(), NotificationView::Summary);
-        let identity = summary.event().process.identity();
+        let identity = summary.event().unwrap().process.identity();
 
         let details = summary.transition(NotificationAction::Details).unwrap();
         assert_eq!(details.view(), NotificationView::Details);
-        assert_eq!(details.event().process.identity(), identity);
+        assert_eq!(details.event().unwrap().process.identity(), identity);
         assert!(details.request().body().contains("Executable:"));
 
         let restored = details.transition(NotificationAction::Back).unwrap();
         assert_eq!(restored.view(), NotificationView::Summary);
-        assert_eq!(restored.event().process.identity(), identity);
+        assert_eq!(restored.event().unwrap().process.identity(), identity);
         assert!(!restored.request().body().contains("Executable:"));
     }
 

@@ -16,7 +16,7 @@ use crate::{
     },
     application::{
         ForceStopProcess, PortError, ProcessSource, StopAndWait, StopError, StopOutcome,
-        WaitForExit,
+        StopWorkload, WaitForExit, workload_from_root,
     },
     runtime::{self, RuntimeError, TopResponse},
 };
@@ -40,6 +40,8 @@ enum Command {
         #[arg(long)]
         watch: bool,
     },
+    /// Show workload trees suspected to be stale.
+    Stale,
     /// Inspect and manage configuration.
     Config {
         #[command(subcommand)]
@@ -55,6 +57,8 @@ enum Command {
         #[arg(long, requires = "kill")]
         yes: bool,
     },
+    /// Gracefully stop a currently reported stale workload tree.
+    StopTree { root_pid: u32 },
 }
 
 #[derive(Debug, Subcommand)]
@@ -81,6 +85,9 @@ pub enum CliError {
     StillRunningAfterKill { pid: u32, wait_seconds: u64 },
     ConfirmationRequired { pid: u32 },
     ConfirmationDeclined { pid: u32 },
+    TreeConfirmationRequired { pid: u32 },
+    TreeConfirmationDeclined { pid: u32 },
+    WorkloadNotReported(u32),
     ConfirmationIo(io::Error),
     Runtime(RuntimeError),
     Output(io::Error),
@@ -112,6 +119,17 @@ impl fmt::Display for CliError {
             Self::ConfirmationDeclined { pid } => {
                 write!(formatter, "SIGKILL for process {pid} was not confirmed")
             }
+            Self::TreeConfirmationRequired { pid } => write!(
+                formatter,
+                "stopping workload tree {pid} requires an interactive terminal"
+            ),
+            Self::TreeConfirmationDeclined { pid } => {
+                write!(formatter, "stopping workload tree {pid} was not confirmed")
+            }
+            Self::WorkloadNotReported(pid) => write!(
+                formatter,
+                "PID {pid} is not a stale workload currently reported by the daemon"
+            ),
             Self::ConfirmationIo(error) => {
                 write!(formatter, "cannot read SIGKILL confirmation: {error}")
             }
@@ -214,7 +232,88 @@ pub fn execute(cli: Cli) -> Result<(), CliError> {
             Ok(())
         }
         Command::Top { watch } => execute_top(watch),
+        Command::Stale => execute_stale(),
         Command::Stop { pid, kill, yes } => execute_stop(pid, kill, yes),
+        Command::StopTree { root_pid } => execute_stop_tree(root_pid),
+    }
+}
+
+fn execute_stale() -> Result<(), CliError> {
+    let stale = runtime::query_stale()?;
+    if stale.workloads.is_empty() {
+        println!("no stale workloads detected");
+        return Ok(());
+    }
+    println!("ROOT PID   CPU      RAM       AGE PROCS NAME");
+    for workload in stale.workloads {
+        println!(
+            "{:<10} {:>6.1}% {:>8} {:>9} {:>5} {}",
+            workload.root_pid,
+            workload.total_cpu_percent,
+            format_bytes(workload.total_memory_bytes),
+            format_duration(workload.age_seconds),
+            workload.process_count,
+            workload.name,
+        );
+    }
+    Ok(())
+}
+
+fn execute_stop_tree(root_pid: u32) -> Result<(), CliError> {
+    let reported = runtime::query_stale()?
+        .workloads
+        .into_iter()
+        .any(|workload| workload.root_pid == root_pid);
+    if !reported {
+        return Err(CliError::WorkloadNotReported(root_pid));
+    }
+    let repository = TomlConfigRepository::from_environment()?;
+    let settings = repository.load()?.settings;
+    let protection = settings.protection_policy();
+    let mut source = SysinfoProcessSource::new();
+    let snapshot = source.snapshot().map_err(CliError::Inspection)?;
+    let root = snapshot
+        .processes
+        .iter()
+        .find(|process| process.descriptor.identity().pid() == root_pid)
+        .ok_or(CliError::ProcessNotFound(root_pid))?;
+    let workload = workload_from_root(
+        &snapshot.processes,
+        root.descriptor.identity(),
+        current_user_id(),
+    )
+    .ok_or(CliError::WorkloadNotReported(root_pid))?;
+    confirm_tree_stop(&workload)?;
+
+    let mut terminator = PidfdTerminationPort;
+    let count = StopWorkload::new(&mut source, &mut terminator, current_user_id(), &protection)
+        .execute(&workload)?;
+    println!("sent SIGTERM to {count} processes in workload tree rooted at PID {root_pid}");
+    Ok(())
+}
+
+fn confirm_tree_stop(workload: &crate::domain::StaleWorkload) -> Result<(), CliError> {
+    let pid = workload.identity().pid();
+    if !io::stdin().is_terminal() {
+        return Err(CliError::TreeConfirmationRequired { pid });
+    }
+    let mut stderr = io::stderr().lock();
+    write!(
+        stderr,
+        "stop {} processes in {} workload ({pid}) with SIGTERM; type {pid} to confirm: ",
+        workload.process_count(),
+        workload.root.name()
+    )
+    .map_err(CliError::ConfirmationIo)?;
+    stderr.flush().map_err(CliError::ConfirmationIo)?;
+    let mut confirmation = String::new();
+    io::stdin()
+        .read_line(&mut confirmation)
+        .map_err(CliError::ConfirmationIo)?;
+    if confirmation.trim() == pid.to_string() {
+        Ok(())
+    } else {
+        Err(CliError::TreeConfirmationDeclined { pid })
     }
 }
 
@@ -519,6 +618,18 @@ mod tests {
         let cli = Cli::try_parse_from(["resource-guard", "top", "--watch"]).unwrap();
 
         assert!(matches!(cli.command, Command::Top { watch: true }));
+    }
+
+    #[test]
+    fn parses_stale_and_stop_tree_commands() {
+        let stale = Cli::try_parse_from(["resource-guard", "stale"]).unwrap();
+        assert!(matches!(stale.command, Command::Stale));
+
+        let stop_tree = Cli::try_parse_from(["resource-guard", "stop-tree", "42"]).unwrap();
+        assert!(matches!(
+            stop_tree.command,
+            Command::StopTree { root_pid: 42 }
+        ));
     }
 
     #[test]

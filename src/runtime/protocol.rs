@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 pub(crate) enum ControlRequest {
     Status,
     Top,
+    Stale,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -12,7 +13,23 @@ pub(crate) enum ControlRequest {
 pub(crate) enum ControlResponse {
     Status { status: StatusResponse },
     Top { top: TopResponse },
+    Stale { stale: StaleResponse },
     Error { message: String },
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct StaleResponse {
+    pub workloads: Vec<StaleWorkloadSummary>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct StaleWorkloadSummary {
+    pub root_pid: u32,
+    pub name: String,
+    pub process_count: usize,
+    pub total_memory_bytes: u64,
+    pub total_cpu_percent: f32,
+    pub age_seconds: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -56,7 +73,10 @@ pub struct TopProcess {
 
 #[cfg(test)]
 mod tests {
-    use super::{ControlRequest, ControlResponse, StatusResponse, TopProcess, TopResponse};
+    use super::{
+        ControlRequest, ControlResponse, StaleResponse, StaleWorkloadSummary, StatusResponse,
+        TopProcess, TopResponse,
+    };
 
     #[test]
     fn status_protocol_round_trips() {
@@ -115,6 +135,29 @@ mod tests {
         assert!(matches!(
             serde_json::from_slice(&encoded).unwrap(),
             ControlResponse::Top { .. }
+        ));
+    }
+
+    #[test]
+    fn stale_protocol_round_trips() {
+        let request = serde_json::to_string(&ControlRequest::Stale).unwrap();
+        assert_eq!(request, r#"{"command":"stale"}"#);
+        let response = ControlResponse::Stale {
+            stale: StaleResponse {
+                workloads: vec![StaleWorkloadSummary {
+                    root_pid: 42,
+                    name: "pytest".to_owned(),
+                    process_count: 3,
+                    total_memory_bytes: 4096,
+                    total_cpu_percent: 0.2,
+                    age_seconds: 3600,
+                }],
+            },
+        };
+        let encoded = serde_json::to_vec(&response).unwrap();
+        assert!(matches!(
+            serde_json::from_slice(&encoded).unwrap(),
+            ControlResponse::Stale { .. }
         ));
     }
 }

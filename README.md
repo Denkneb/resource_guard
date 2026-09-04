@@ -16,6 +16,8 @@ The project is Linux-only. It does not require root privileges and is distribute
 - notification actions for `SIGTERM`, one-hour ignore, permanent ignore, and details;
 - local authenticated control socket under `$XDG_RUNTIME_DIR/resource-guard`;
 - `status` and daemon-backed `top` commands;
+- detection of old, low-CPU test/tool workload trees during memory pressure;
+- daemon-backed `stale` inspection and confirmed, leaf-first `stop-tree` termination;
 - PID reuse protection using PID, UID, and Linux process start time;
 - foreground daemon suitable for a `systemd --user` service.
 - opt-in emergency termination of allowlisted or largest unprotected current-user processes.
@@ -24,7 +26,7 @@ The CLI can send a separately confirmed `SIGKILL` only after `SIGTERM` fails. No
 
 ## Build
 
-Install Rust 1.95 or newer, then build the release binary:
+Install Rust 1.98 or newer, then build the release binary:
 
 ```console
 cargo build --release --locked
@@ -45,9 +47,9 @@ The measured release daemon uses 5.99 MiB peak RSS and averages 0.498% of one lo
 Release archives currently target 64-bit glibc-based Linux (`x86_64-unknown-linux-gnu`). Download the archive and its `.sha256` file from the corresponding GitHub release, then verify and extract it:
 
 ```console
-sha256sum --check resource-guard-0.2.2-x86_64-unknown-linux-gnu.tar.gz.sha256
-tar -xzf resource-guard-0.2.2-x86_64-unknown-linux-gnu.tar.gz
-cd resource-guard-0.2.2-x86_64-unknown-linux-gnu
+sha256sum --check resource-guard-0.3.0-x86_64-unknown-linux-gnu.tar.gz.sha256
+tar -xzf resource-guard-0.3.0-x86_64-unknown-linux-gnu.tar.gz
+cd resource-guard-0.3.0-x86_64-unknown-linux-gnu
 ```
 
 Install the extracted binary and user service without `sudo`:
@@ -147,6 +149,14 @@ The emergency floor can enter the critical state immediately. Other critical con
 
 Userspace polling cannot guarantee recovery from every sudden allocation spike. Swap, cgroup memory controls, and a system OOM service remain useful independent safeguards.
 
+## Stale workload detection
+
+During warning, critical, or recovery memory pressure, Resource Guard can identify old, low-CPU trees created by configured developer tools such as `pytest`, `coverage`, `black`, and `pre-commit`. A candidate must exceed the configured age and aggregate resident-memory thresholds for several consecutive samples. The detector groups related launcher processes without crossing into an unrelated parent session.
+
+This feature is notification-only by default and never sends a signal automatically. The notification supports details, one-hour ignore, permanent root-name ignore, and a graceful stop action. Stopping revalidates PID, UID, and start time for every member and sends only `SIGTERM`, leaf-first. There is no `SIGKILL` fallback for workload trees.
+
+All thresholds, candidate and launcher names, ignored root names, sample count, and notification cooldown are available under `[stale_workloads]` in [`config.example.toml`](config.example.toml).
+
 ## CLI
 
 Run the daemon in the foreground:
@@ -166,6 +176,18 @@ Show the latest monitored process snapshot, once or continuously:
 ```console
 resource-guard top
 resource-guard top --watch
+```
+
+Show workload trees currently classified as stale:
+
+```console
+resource-guard stale
+```
+
+Gracefully stop a reported tree after typing its exact root PID:
+
+```console
+resource-guard stop-tree ROOT_PID
 ```
 
 Gracefully stop a process:

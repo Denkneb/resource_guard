@@ -24,7 +24,8 @@ use crate::{
     application::{
         EmergencyService, ForceStopProcess, MemoryPressureMonitor, MonitorService,
         NotificationAction, NotificationBinding, NotificationBindings, NotificationEvent,
-        NotificationRequest, NotificationSink, NotificationView, ProcessSource, StopProcess,
+        NotificationRequest, NotificationSink, NotificationView, ProcessSource,
+        StaleWorkloadService, StopProcess, StopWorkload,
     },
     domain::{
         EmergencyAction, EmergencyCandidate, IgnoreRule, MemoryPressureLevel,
@@ -35,7 +36,7 @@ use crate::{
 use super::{
     RuntimeError,
     paths::{control_socket_path, prepare_runtime_directory},
-    protocol::{ControlRequest, ControlResponse, StatusResponse, TopResponse},
+    protocol::{ControlRequest, ControlResponse, StaleResponse, StatusResponse, TopResponse},
     state::DaemonState,
 };
 
@@ -82,6 +83,16 @@ pub fn query_top() -> Result<TopResponse, RuntimeError> {
     build_runtime()?.block_on(query_top_async())
 }
 
+/// Fetches workload trees currently classified as stale by the daemon.
+///
+/// # Errors
+///
+/// Returns an error when the runtime path is unavailable, the daemon cannot be
+/// reached, or its response is invalid.
+pub fn query_stale() -> Result<StaleResponse, RuntimeError> {
+    build_runtime()?.block_on(query_stale_async())
+}
+
 fn build_runtime() -> Result<tokio::runtime::Runtime, RuntimeError> {
     Builder::new_current_thread()
         .enable_all()
@@ -123,6 +134,8 @@ async fn run_daemon_async() -> Result<(), RuntimeError> {
         settings.emergency_policy(),
         settings.emergency.action_cooldown,
     );
+    let mut stale_workloads =
+        StaleWorkloadService::new(current_user_id(), settings.stale_workload_policy());
     let emergency_epoch = std::time::Instant::now();
     let mut pending_emergency = None;
     let mut last_emergency_scan = None;
@@ -170,6 +183,8 @@ async fn run_daemon_async() -> Result<(), RuntimeError> {
                 match monitor.poll() {
                     Ok(report) => record_monitor_report(
                         report,
+                        &mut stale_workloads,
+                        emergency_epoch.elapsed(),
                         &mut notifier,
                         &mut notification_bindings,
                         &state,
@@ -197,6 +212,8 @@ async fn run_daemon_async() -> Result<(), RuntimeError> {
                             event,
                             &mut notification_bindings,
                             &mut monitor,
+                            &mut stale_workloads,
+                            emergency_epoch.elapsed(),
                             &mut notifier,
                             &repository,
                             &mut settings,
@@ -465,6 +482,8 @@ async fn record_poll_error(state: &Arc<RwLock<DaemonState>>, error: crate::appli
 
 async fn record_monitor_report(
     report: crate::application::MonitorReport,
+    stale_service: &mut StaleWorkloadService,
+    now: Duration,
     notifier: &mut Option<ZbusNotificationSink>,
     bindings: &mut NotificationBindings,
     state: &Arc<RwLock<DaemonState>>,
@@ -502,6 +521,51 @@ async fn record_monitor_report(
             }
         }
     }
+    let pressure = state.read().await.pressure_level();
+    let observed = report
+        .processes
+        .iter()
+        .map(|process| process.observed.clone())
+        .collect::<Vec<_>>();
+    let (stale_candidates, notifications) = stale_service.evaluate(&observed, pressure, now);
+    state
+        .write()
+        .await
+        .record_stale_workloads(&stale_candidates);
+    for workload in notifications {
+        warn!(
+            pid = workload.identity().pid(),
+            process = workload.root.name(),
+            process_count = workload.process_count(),
+            memory_bytes = workload.total_memory_bytes,
+            cpu_percent = workload.total_cpu_percent,
+            "suspected stale workload detected"
+        );
+        if let Some(sink) = notifier.as_mut() {
+            match sink
+                .notify(
+                    NotificationRequest::for_stale_workload(&workload, NotificationView::Summary),
+                    None,
+                )
+                .await
+            {
+                Ok(notification_id) => bindings.remember(
+                    notification_id,
+                    NotificationBinding::for_workload(workload, NotificationView::Summary),
+                ),
+                Err(error) => {
+                    warn!(%error, "stale workload notification failed");
+                    state
+                        .write()
+                        .await
+                        .record_notification_error(error.to_string());
+                    bindings.clear();
+                    *notifier = None;
+                    break;
+                }
+            }
+        }
+    }
     state.write().await.record_report(&report);
 }
 
@@ -535,10 +599,13 @@ async fn connect_notifications(
     }
 }
 
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 async fn handle_notification_event(
     event: NotificationEvent,
     bindings: &mut NotificationBindings,
     monitor: &mut MonitorService<SysinfoProcessSource, SystemClock>,
+    stale_service: &mut StaleWorkloadService,
+    now: Duration,
     notifier: &mut Option<ZbusNotificationSink>,
     repository: &TomlConfigRepository,
     settings: &mut crate::application::Settings,
@@ -591,46 +658,77 @@ async fn handle_notification_event(
     }
 
     bindings.remove(notification_id);
-    let monitored_event = binding.event();
     close_handled_notification(notifier, notification_id).await;
 
     match action {
         NotificationAction::Stop => {
-            let identity = monitored_event.process.identity();
             let mut source = SysinfoProcessSource::new();
             let mut terminator = PidfdTerminationPort;
             let policy = settings.protection_policy();
-            match StopProcess::new(&mut source, &mut terminator, current_user_id(), &policy)
-                .execute(identity)
-            {
-                Ok(()) => info!(
-                    pid = identity.pid(),
-                    "SIGTERM sent from notification action"
-                ),
-                Err(error) => {
-                    warn!(pid = identity.pid(), %error, "notification stop action rejected");
+            if let Some(workload) = binding.workload() {
+                let identity = workload.identity();
+                match StopWorkload::new(&mut source, &mut terminator, current_user_id(), &policy)
+                    .execute(workload)
+                {
+                    Ok(count) => info!(
+                        pid = identity.pid(),
+                        count, "SIGTERM sent to stale workload"
+                    ),
+                    Err(error) => warn!(pid = identity.pid(), %error, "workload stop rejected"),
+                }
+            } else if let Some(monitored_event) = binding.event() {
+                let identity = monitored_event.process.identity();
+                match StopProcess::new(&mut source, &mut terminator, current_user_id(), &policy)
+                    .execute(identity)
+                {
+                    Ok(()) => info!(
+                        pid = identity.pid(),
+                        "SIGTERM sent from notification action"
+                    ),
+                    Err(error) => {
+                        warn!(pid = identity.pid(), %error, "notification stop action rejected");
+                    }
                 }
             }
         }
         NotificationAction::IgnoreForHour => {
-            monitor.ignore_for(monitored_event.process.identity(), Duration::from_hours(1));
-            info!(
-                pid = monitored_event.process.identity().pid(),
-                "process ignored for one hour"
-            );
+            if let Some(workload) = binding.workload() {
+                stale_service.ignore_for(workload.identity(), now + Duration::from_hours(1));
+                info!(
+                    pid = workload.identity().pid(),
+                    "workload ignored for one hour"
+                );
+            } else if let Some(monitored_event) = binding.event() {
+                monitor.ignore_for(monitored_event.process.identity(), Duration::from_hours(1));
+                info!(
+                    pid = monitored_event.process.identity().pid(),
+                    "process ignored for one hour"
+                );
+            }
         }
         NotificationAction::AlwaysIgnore => {
-            let rule = IgnoreRule::for_process(&monitored_event.process);
             let mut updated = settings.clone();
-            updated.add_ignore_rule(rule);
+            if let Some(workload) = binding.workload() {
+                updated.add_stale_workload_ignore(workload.root.name().to_owned());
+            } else if let Some(monitored_event) = binding.event() {
+                updated.add_ignore_rule(IgnoreRule::for_process(&monitored_event.process));
+            }
             match repository.save(&updated) {
                 Ok(()) => {
                     *settings = updated;
-                    monitor.ignore_permanently(&monitored_event.process);
-                    info!(
-                        pid = monitored_event.process.identity().pid(),
-                        "process permanently ignored"
-                    );
+                    if let Some(workload) = binding.workload() {
+                        stale_service.ignore_name(workload.root.name().to_owned());
+                        info!(
+                            pid = workload.identity().pid(),
+                            "workload permanently ignored"
+                        );
+                    } else if let Some(monitored_event) = binding.event() {
+                        monitor.ignore_permanently(&monitored_event.process);
+                        info!(
+                            pid = monitored_event.process.identity().pid(),
+                            "process permanently ignored"
+                        );
+                    }
                 }
                 Err(error) => {
                     warn!(%error, "cannot persist permanent process ignore");
@@ -788,6 +886,9 @@ async fn handle_client(
         Ok(ControlRequest::Top) => ControlResponse::Top {
             top: state.read().await.top(),
         },
+        Ok(ControlRequest::Stale) => ControlResponse::Stale {
+            stale: state.read().await.stale(),
+        },
         Err(error) => ControlResponse::Error {
             message: format!("invalid request: {error}"),
         },
@@ -818,6 +919,9 @@ async fn query_status_async() -> Result<StatusResponse, RuntimeError> {
         ControlResponse::Top { .. } => Err(RuntimeError::Protocol(
             "daemon returned top data for a status request".to_owned(),
         )),
+        ControlResponse::Stale { .. } => Err(RuntimeError::Protocol(
+            "daemon returned stale data for a status request".to_owned(),
+        )),
     }
 }
 
@@ -827,6 +931,22 @@ async fn query_top_async() -> Result<TopResponse, RuntimeError> {
         ControlResponse::Error { message } => Err(RuntimeError::Protocol(message)),
         ControlResponse::Status { .. } => Err(RuntimeError::Protocol(
             "daemon returned status data for a top request".to_owned(),
+        )),
+        ControlResponse::Stale { .. } => Err(RuntimeError::Protocol(
+            "daemon returned stale data for a top request".to_owned(),
+        )),
+    }
+}
+
+async fn query_stale_async() -> Result<StaleResponse, RuntimeError> {
+    match query(ControlRequest::Stale).await? {
+        ControlResponse::Stale { stale } => Ok(stale),
+        ControlResponse::Error { message } => Err(RuntimeError::Protocol(message)),
+        ControlResponse::Status { .. } => Err(RuntimeError::Protocol(
+            "daemon returned status data for a stale request".to_owned(),
+        )),
+        ControlResponse::Top { .. } => Err(RuntimeError::Protocol(
+            "daemon returned top data for a stale request".to_owned(),
         )),
     }
 }

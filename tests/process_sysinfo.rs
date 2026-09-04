@@ -7,7 +7,9 @@ use std::{
     time::Duration,
 };
 
-use resource_guard::{adapters::SysinfoProcessSource, application::ProcessSource};
+use resource_guard::{
+    adapters::SysinfoProcessSource, application::ProcessSource, domain::ProcessState,
+};
 
 struct ChildGuard(Child);
 
@@ -44,4 +46,15 @@ fn finds_a_controlled_child_process_with_stable_identity() {
     assert_eq!(process.identity().pid(), pid);
     assert_eq!(process.identity().uid(), expected_uid);
     assert_ne!(process.identity().started_at(), 0);
+
+    let observed = source
+        .snapshot()
+        .expect("snapshot should succeed")
+        .processes
+        .into_iter()
+        .find(|observed| observed.descriptor.identity().pid() == pid)
+        .expect("child should be present in the process tree snapshot");
+    assert_eq!(observed.descriptor.parent_pid(), Some(std::process::id()));
+    assert_ne!(observed.descriptor.state(), ProcessState::Other);
+    assert_ne!(observed.descriptor.state(), ProcessState::Zombie);
 }

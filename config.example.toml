@@ -30,6 +30,18 @@ allowed_executables = []
 exempt_names = ["resource-guard"]
 exempt_executables = []
 
+[stale_workloads]
+enabled = true
+only_under_memory_pressure = true
+candidate_names = ["pytest", "coverage", "black", "pre-commit"]
+launcher_names = ["uv", "pytest", "coverage", "black", "pre-commit", "python", "python3", "xargs", "bash", "sh"]
+ignored_root_names = []
+minimum_age_minutes = 60
+minimum_tree_memory_mib = 256
+maximum_cpu_percent = 5.0
+consecutive_samples = 3
+notification_cooldown_minutes = 30
+
 [termination]
 grace_period_seconds = 10
 

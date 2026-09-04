@@ -46,8 +46,8 @@ fn readme_install_path_matches_the_unit() {
 
 #[test]
 fn package_declares_and_ci_checks_the_msrv() {
-    assert!(CARGO_MANIFEST.contains("rust-version = \"1.95\""));
-    assert!(CI_WORKFLOW.contains("dtolnay/rust-toolchain@1.95.0"));
+    assert!(CARGO_MANIFEST.contains("rust-version = \"1.98\""));
+    assert!(CI_WORKFLOW.contains("dtolnay/rust-toolchain@1.98.0"));
     assert!(CI_WORKFLOW.contains("cargo check --locked --all-targets --all-features"));
 }
 

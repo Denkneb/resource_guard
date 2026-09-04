@@ -2,7 +2,7 @@ use std::{error::Error, fmt, path::PathBuf, time::Duration};
 
 use crate::domain::{
     EmergencyAction, EmergencyActivationPolicy, EmergencyPolicy, IgnoreRule, MemoryPressurePolicy,
-    ProtectionPolicy, Thresholds, ViolationPolicy,
+    ProtectionPolicy, StaleWorkloadPolicy, Thresholds, ViolationPolicy,
 };
 
 const BYTES_PER_MIB: u64 = 1_048_576;
@@ -12,6 +12,7 @@ pub struct Settings {
     pub monitor: MonitorSettings,
     pub memory_pressure: MemoryPressureSettings,
     pub emergency: EmergencySettings,
+    pub stale_workloads: StaleWorkloadSettings,
     pub termination: TerminationSettings,
     pub processes: ProcessSettings,
     pub notifications: NotificationSettings,
@@ -84,6 +85,15 @@ impl Settings {
         }
         if self.termination.grace_period.is_zero() {
             return Err(ConfigValidationError::ZeroGracePeriod);
+        }
+        if self.stale_workloads.minimum_age.is_zero()
+            || self.stale_workloads.minimum_tree_memory_bytes == 0
+            || self.stale_workloads.consecutive_samples == 0
+            || self.stale_workloads.notification_cooldown.is_zero()
+            || !self.stale_workloads.maximum_cpu_percent.is_finite()
+            || self.stale_workloads.maximum_cpu_percent < 0.0
+        {
+            return Err(ConfigValidationError::InvalidStaleWorkloadPolicy);
         }
         if self.notifications.timeout.is_zero() {
             return Err(ConfigValidationError::ZeroNotificationTimeout);
@@ -174,6 +184,37 @@ impl Settings {
         }
     }
 
+    #[must_use]
+    pub fn stale_workload_policy(&self) -> StaleWorkloadPolicy {
+        StaleWorkloadPolicy {
+            enabled: self.stale_workloads.enabled,
+            only_under_memory_pressure: self.stale_workloads.only_under_memory_pressure,
+            candidate_names: self
+                .stale_workloads
+                .candidate_names
+                .iter()
+                .cloned()
+                .collect(),
+            launcher_names: self
+                .stale_workloads
+                .launcher_names
+                .iter()
+                .cloned()
+                .collect(),
+            ignored_root_names: self
+                .stale_workloads
+                .ignored_root_names
+                .iter()
+                .cloned()
+                .collect(),
+            minimum_age: self.stale_workloads.minimum_age,
+            minimum_tree_memory_bytes: self.stale_workloads.minimum_tree_memory_bytes,
+            maximum_cpu_percent: self.stale_workloads.maximum_cpu_percent,
+            consecutive_samples: self.stale_workloads.consecutive_samples,
+            notification_cooldown: self.stale_workloads.notification_cooldown,
+        }
+    }
+
     pub fn add_ignore_rule(&mut self, rule: IgnoreRule) {
         match rule {
             IgnoreRule::Name(name) => {
@@ -186,6 +227,12 @@ impl Settings {
                     self.processes.ignored_executables.push(path);
                 }
             }
+        }
+    }
+
+    pub fn add_stale_workload_ignore(&mut self, name: String) {
+        if !self.stale_workloads.ignored_root_names.contains(&name) {
+            self.stale_workloads.ignored_root_names.push(name);
         }
     }
 }
@@ -252,6 +299,54 @@ impl Default for EmergencySettings {
             allowed_executables: Vec::new(),
             exempt_names: vec!["resource-guard".to_owned()],
             exempt_executables: Vec::new(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct StaleWorkloadSettings {
+    pub enabled: bool,
+    pub only_under_memory_pressure: bool,
+    pub candidate_names: Vec<String>,
+    pub launcher_names: Vec<String>,
+    pub ignored_root_names: Vec<String>,
+    pub minimum_age: Duration,
+    pub minimum_tree_memory_bytes: u64,
+    pub maximum_cpu_percent: f32,
+    pub consecutive_samples: u32,
+    pub notification_cooldown: Duration,
+}
+
+impl Default for StaleWorkloadSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            only_under_memory_pressure: true,
+            candidate_names: vec!["pytest", "coverage", "black", "pre-commit"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect(),
+            launcher_names: vec![
+                "uv",
+                "pytest",
+                "coverage",
+                "black",
+                "pre-commit",
+                "python",
+                "python3",
+                "xargs",
+                "bash",
+                "sh",
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
+            ignored_root_names: Vec::new(),
+            minimum_age: Duration::from_hours(1),
+            minimum_tree_memory_bytes: 256 * BYTES_PER_MIB,
+            maximum_cpu_percent: 5.0,
+            consecutive_samples: 3,
+            notification_cooldown: Duration::from_mins(30),
         }
     }
 }
@@ -342,6 +437,7 @@ pub enum ConfigValidationError {
     ZeroEmergencyCooldown,
     ZeroEmergencyActionMemory,
     InvalidEmergencyPsiThreshold,
+    InvalidStaleWorkloadPolicy,
     ZeroGracePeriod,
     ZeroNotificationTimeout,
     RelativeExecutable(PathBuf),
@@ -415,6 +511,10 @@ impl fmt::Display for ConfigValidationError {
                     "emergency action PSI threshold must be finite and within 0..=100"
                 )
             }
+            Self::InvalidStaleWorkloadPolicy => write!(
+                formatter,
+                "stale workload thresholds, samples, durations, and CPU limit must be valid"
+            ),
             Self::ZeroGracePeriod => write!(formatter, "grace period must be greater than zero"),
             Self::ZeroNotificationTimeout => {
                 write!(formatter, "notification timeout must be greater than zero")

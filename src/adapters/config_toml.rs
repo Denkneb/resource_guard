@@ -253,9 +253,31 @@ struct ConfigDocument {
     monitor: MonitorDocument,
     memory_pressure: MemoryPressureDocument,
     emergency: EmergencyDocument,
+    stale_workloads: StaleWorkloadDocument,
     termination: TerminationDocument,
     processes: ProcessDocument,
     notifications: NotificationDocument,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+struct StaleWorkloadDocument {
+    enabled: bool,
+    only_under_memory_pressure: bool,
+    candidate_names: Vec<String>,
+    launcher_names: Vec<String>,
+    ignored_root_names: Vec<String>,
+    minimum_age_minutes: u64,
+    minimum_tree_memory_mib: u64,
+    maximum_cpu_percent: f32,
+    consecutive_samples: u32,
+    notification_cooldown_minutes: u64,
+}
+
+impl Default for StaleWorkloadDocument {
+    fn default() -> Self {
+        Self::from(&crate::application::StaleWorkloadSettings::default())
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -414,6 +436,31 @@ impl From<ConfigDocument> for Settings {
                 exempt_names: document.emergency.exempt_names,
                 exempt_executables: document.emergency.exempt_executables,
             },
+            stale_workloads: crate::application::StaleWorkloadSettings {
+                enabled: document.stale_workloads.enabled,
+                only_under_memory_pressure: document.stale_workloads.only_under_memory_pressure,
+                candidate_names: document.stale_workloads.candidate_names,
+                launcher_names: document.stale_workloads.launcher_names,
+                ignored_root_names: document.stale_workloads.ignored_root_names,
+                minimum_age: Duration::from_secs(
+                    document
+                        .stale_workloads
+                        .minimum_age_minutes
+                        .saturating_mul(60),
+                ),
+                minimum_tree_memory_bytes: document
+                    .stale_workloads
+                    .minimum_tree_memory_mib
+                    .saturating_mul(BYTES_PER_MIB),
+                maximum_cpu_percent: document.stale_workloads.maximum_cpu_percent,
+                consecutive_samples: document.stale_workloads.consecutive_samples,
+                notification_cooldown: Duration::from_secs(
+                    document
+                        .stale_workloads
+                        .notification_cooldown_minutes
+                        .saturating_mul(60),
+                ),
+            },
             termination: TerminationSettings {
                 grace_period: Duration::from_secs(document.termination.grace_period_seconds),
             },
@@ -437,9 +484,27 @@ impl From<&Settings> for ConfigDocument {
             monitor: MonitorDocument::from(&settings.monitor),
             memory_pressure: MemoryPressureDocument::from(&settings.memory_pressure),
             emergency: EmergencyDocument::from(&settings.emergency),
+            stale_workloads: StaleWorkloadDocument::from(&settings.stale_workloads),
             termination: TerminationDocument::from(&settings.termination),
             processes: ProcessDocument::from(&settings.processes),
             notifications: NotificationDocument::from(&settings.notifications),
+        }
+    }
+}
+
+impl From<&crate::application::StaleWorkloadSettings> for StaleWorkloadDocument {
+    fn from(settings: &crate::application::StaleWorkloadSettings) -> Self {
+        Self {
+            enabled: settings.enabled,
+            only_under_memory_pressure: settings.only_under_memory_pressure,
+            candidate_names: settings.candidate_names.clone(),
+            launcher_names: settings.launcher_names.clone(),
+            ignored_root_names: settings.ignored_root_names.clone(),
+            minimum_age_minutes: settings.minimum_age.as_secs() / 60,
+            minimum_tree_memory_mib: settings.minimum_tree_memory_bytes / BYTES_PER_MIB,
+            maximum_cpu_percent: settings.maximum_cpu_percent,
+            consecutive_samples: settings.consecutive_samples,
+            notification_cooldown_minutes: settings.notification_cooldown.as_secs() / 60,
         }
     }
 }
