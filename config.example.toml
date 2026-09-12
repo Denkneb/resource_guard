@@ -42,6 +42,21 @@ maximum_cpu_percent = 5.0
 consecutive_samples = 3
 notification_cooldown_minutes = 30
 
+[background_workloads]
+enabled = true
+minimum_age_minutes = 60
+minimum_memory_mib = 256
+large_memory_mib = 512
+growth_window_minutes = 30
+minimum_memory_growth_mib = 128
+minimum_process_count_growth = 2
+maximum_cpu_percent = 5.0
+consecutive_samples = 3
+sample_interval_seconds = 60
+notification_cooldown_minutes = 30
+ignored_root_names = []
+ignored_root_executables = []
+
 [termination]
 grace_period_seconds = 10
 

@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -6,6 +8,7 @@ pub(crate) enum ControlRequest {
     Status,
     Top,
     Stale,
+    Background,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -14,6 +17,7 @@ pub(crate) enum ControlResponse {
     Status { status: StatusResponse },
     Top { top: TopResponse },
     Stale { stale: StaleResponse },
+    Background { background: BackgroundResponse },
     Error { message: String },
 }
 
@@ -30,6 +34,28 @@ pub struct StaleWorkloadSummary {
     pub total_memory_bytes: u64,
     pub total_cpu_percent: f32,
     pub age_seconds: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct BackgroundResponse {
+    pub workloads: Vec<BackgroundWorkloadSummary>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct BackgroundWorkloadSummary {
+    pub group_id: String,
+    pub root_pid: u32,
+    pub root_uid: u32,
+    pub root_started_at: u64,
+    pub name: String,
+    pub executable: Option<PathBuf>,
+    pub process_count: usize,
+    pub process_count_growth: usize,
+    pub total_memory_bytes: u64,
+    pub memory_growth_bytes: u64,
+    pub total_cpu_percent: f32,
+    pub age_seconds: u64,
+    pub observed_for_seconds: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -74,8 +100,8 @@ pub struct TopProcess {
 #[cfg(test)]
 mod tests {
     use super::{
-        ControlRequest, ControlResponse, StaleResponse, StaleWorkloadSummary, StatusResponse,
-        TopProcess, TopResponse,
+        BackgroundResponse, BackgroundWorkloadSummary, ControlRequest, ControlResponse,
+        StaleResponse, StaleWorkloadSummary, StatusResponse, TopProcess, TopResponse,
     };
 
     #[test]
@@ -158,6 +184,36 @@ mod tests {
         assert!(matches!(
             serde_json::from_slice(&encoded).unwrap(),
             ControlResponse::Stale { .. }
+        ));
+    }
+
+    #[test]
+    fn background_protocol_round_trips() {
+        let request = serde_json::to_string(&ControlRequest::Background).unwrap();
+        assert_eq!(request, r#"{"command":"background"}"#);
+        let response = ControlResponse::Background {
+            background: BackgroundResponse {
+                workloads: vec![BackgroundWorkloadSummary {
+                    group_id: "systemd-unit:app-1.scope".to_owned(),
+                    root_pid: 42,
+                    root_uid: 1_000,
+                    root_started_at: 99,
+                    name: "worker".to_owned(),
+                    executable: Some("/usr/bin/worker".into()),
+                    process_count: 3,
+                    process_count_growth: 2,
+                    total_memory_bytes: 4_096,
+                    memory_growth_bytes: 1_024,
+                    total_cpu_percent: 0.4,
+                    age_seconds: 3_600,
+                    observed_for_seconds: 1_800,
+                }],
+            },
+        };
+        let encoded = serde_json::to_vec(&response).unwrap();
+        assert!(matches!(
+            serde_json::from_slice(&encoded).unwrap(),
+            ControlResponse::Background { .. }
         ));
     }
 }

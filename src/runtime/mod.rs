@@ -5,8 +5,11 @@ mod state;
 
 use std::{error::Error, fmt, io};
 
-pub use daemon::{query_stale, query_status, query_top, run_daemon};
-pub use protocol::{StaleResponse, StaleWorkloadSummary, StatusResponse, TopProcess, TopResponse};
+pub use daemon::{query_background, query_stale, query_status, query_top, run_daemon};
+pub use protocol::{
+    BackgroundResponse, BackgroundWorkloadSummary, StaleResponse, StaleWorkloadSummary,
+    StatusResponse, TopProcess, TopResponse,
+};
 
 #[derive(Debug)]
 pub enum RuntimeError {

@@ -9,8 +9,8 @@ use std::{
 use serde::{Deserialize, Serialize};
 
 use crate::application::{
-    ConfigValidationError, EmergencySettings, MemoryPressureSettings, MonitorSettings,
-    NotificationSettings, ProcessSettings, Settings, TerminationSettings,
+    BackgroundWorkloadSettings, ConfigValidationError, EmergencySettings, MemoryPressureSettings,
+    MonitorSettings, NotificationSettings, ProcessSettings, Settings, TerminationSettings,
 };
 use crate::domain::EmergencyAction;
 
@@ -254,6 +254,7 @@ struct ConfigDocument {
     memory_pressure: MemoryPressureDocument,
     emergency: EmergencyDocument,
     stale_workloads: StaleWorkloadDocument,
+    background_workloads: BackgroundWorkloadDocument,
     termination: TerminationDocument,
     processes: ProcessDocument,
     notifications: NotificationDocument,
@@ -277,6 +278,30 @@ struct StaleWorkloadDocument {
 impl Default for StaleWorkloadDocument {
     fn default() -> Self {
         Self::from(&crate::application::StaleWorkloadSettings::default())
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+struct BackgroundWorkloadDocument {
+    enabled: bool,
+    minimum_age_minutes: u64,
+    minimum_memory_mib: u64,
+    large_memory_mib: u64,
+    growth_window_minutes: u64,
+    minimum_memory_growth_mib: u64,
+    minimum_process_count_growth: usize,
+    maximum_cpu_percent: f32,
+    consecutive_samples: u32,
+    sample_interval_seconds: u64,
+    notification_cooldown_minutes: u64,
+    ignored_root_names: Vec<String>,
+    ignored_root_executables: Vec<PathBuf>,
+}
+
+impl Default for BackgroundWorkloadDocument {
+    fn default() -> Self {
+        Self::from(&BackgroundWorkloadSettings::default())
     }
 }
 
@@ -388,6 +413,7 @@ struct ProcessDocument {
     ignored_executables: Vec<PathBuf>,
 }
 
+#[allow(clippy::too_many_lines)]
 impl From<ConfigDocument> for Settings {
     fn from(document: ConfigDocument) -> Self {
         Self {
@@ -461,6 +487,49 @@ impl From<ConfigDocument> for Settings {
                         .saturating_mul(60),
                 ),
             },
+            background_workloads: BackgroundWorkloadSettings {
+                enabled: document.background_workloads.enabled,
+                minimum_age: Duration::from_secs(
+                    document
+                        .background_workloads
+                        .minimum_age_minutes
+                        .saturating_mul(60),
+                ),
+                minimum_memory_bytes: document
+                    .background_workloads
+                    .minimum_memory_mib
+                    .saturating_mul(BYTES_PER_MIB),
+                large_memory_bytes: document
+                    .background_workloads
+                    .large_memory_mib
+                    .saturating_mul(BYTES_PER_MIB),
+                growth_window: Duration::from_secs(
+                    document
+                        .background_workloads
+                        .growth_window_minutes
+                        .saturating_mul(60),
+                ),
+                minimum_memory_growth_bytes: document
+                    .background_workloads
+                    .minimum_memory_growth_mib
+                    .saturating_mul(BYTES_PER_MIB),
+                minimum_process_count_growth: document
+                    .background_workloads
+                    .minimum_process_count_growth,
+                maximum_cpu_percent: document.background_workloads.maximum_cpu_percent,
+                consecutive_samples: document.background_workloads.consecutive_samples,
+                sample_interval: Duration::from_secs(
+                    document.background_workloads.sample_interval_seconds,
+                ),
+                notification_cooldown: Duration::from_secs(
+                    document
+                        .background_workloads
+                        .notification_cooldown_minutes
+                        .saturating_mul(60),
+                ),
+                ignored_root_names: document.background_workloads.ignored_root_names,
+                ignored_root_executables: document.background_workloads.ignored_root_executables,
+            },
             termination: TerminationSettings {
                 grace_period: Duration::from_secs(document.termination.grace_period_seconds),
             },
@@ -485,6 +554,7 @@ impl From<&Settings> for ConfigDocument {
             memory_pressure: MemoryPressureDocument::from(&settings.memory_pressure),
             emergency: EmergencyDocument::from(&settings.emergency),
             stale_workloads: StaleWorkloadDocument::from(&settings.stale_workloads),
+            background_workloads: BackgroundWorkloadDocument::from(&settings.background_workloads),
             termination: TerminationDocument::from(&settings.termination),
             processes: ProcessDocument::from(&settings.processes),
             notifications: NotificationDocument::from(&settings.notifications),
@@ -505,6 +575,26 @@ impl From<&crate::application::StaleWorkloadSettings> for StaleWorkloadDocument 
             maximum_cpu_percent: settings.maximum_cpu_percent,
             consecutive_samples: settings.consecutive_samples,
             notification_cooldown_minutes: settings.notification_cooldown.as_secs() / 60,
+        }
+    }
+}
+
+impl From<&BackgroundWorkloadSettings> for BackgroundWorkloadDocument {
+    fn from(settings: &BackgroundWorkloadSettings) -> Self {
+        Self {
+            enabled: settings.enabled,
+            minimum_age_minutes: settings.minimum_age.as_secs() / 60,
+            minimum_memory_mib: settings.minimum_memory_bytes / BYTES_PER_MIB,
+            large_memory_mib: settings.large_memory_bytes / BYTES_PER_MIB,
+            growth_window_minutes: settings.growth_window.as_secs() / 60,
+            minimum_memory_growth_mib: settings.minimum_memory_growth_bytes / BYTES_PER_MIB,
+            minimum_process_count_growth: settings.minimum_process_count_growth,
+            maximum_cpu_percent: settings.maximum_cpu_percent,
+            consecutive_samples: settings.consecutive_samples,
+            sample_interval_seconds: settings.sample_interval.as_secs(),
+            notification_cooldown_minutes: settings.notification_cooldown.as_secs() / 60,
+            ignored_root_names: settings.ignored_root_names.clone(),
+            ignored_root_executables: settings.ignored_root_executables.clone(),
         }
     }
 }
@@ -777,5 +867,48 @@ mod tests {
 
         assert_eq!(repository.load().unwrap().settings, settings);
         assert!(fs::read_to_string(path).unwrap().contains("compiler"));
+    }
+
+    #[test]
+    fn old_partial_config_gets_background_workload_defaults() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        fs::write(&path, "[monitor]\npoll_interval_seconds = 7\n").unwrap();
+        let repository = TomlConfigRepository::new(path);
+
+        let settings = repository.load().unwrap().settings;
+
+        assert!(settings.background_workloads.enabled);
+        assert_eq!(settings.background_workloads.minimum_age.as_secs(), 3_600);
+        assert_eq!(
+            settings.background_workloads.large_memory_bytes,
+            512 * 1_048_576
+        );
+        assert_eq!(
+            settings.background_workloads.minimum_process_count_growth,
+            2
+        );
+    }
+
+    #[test]
+    fn background_workload_section_round_trips_through_save_and_load() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        let repository = TomlConfigRepository::new(&path);
+        let mut settings = crate::application::Settings::default();
+        settings.background_workloads.enabled = false;
+        settings.background_workloads.large_memory_bytes = 1_024 * 1_048_576;
+        settings
+            .background_workloads
+            .ignored_root_names
+            .push("worker".to_owned());
+
+        repository.save(&settings).unwrap();
+
+        assert_eq!(repository.load().unwrap().settings, settings);
+        let contents = fs::read_to_string(path).unwrap();
+        assert!(contents.contains("[background_workloads]"));
+        assert!(contents.contains("large_memory_mib = 1024"));
+        assert!(contents.contains("ignored_root_names = [\"worker\"]"));
     }
 }

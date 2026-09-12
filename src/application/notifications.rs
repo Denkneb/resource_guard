@@ -4,7 +4,7 @@ use std::{
     future::Future,
 };
 
-use crate::domain::{MemoryPressureEvaluation, StaleWorkload};
+use crate::domain::{BackgroundWorkload, MemoryPressureEvaluation, StaleWorkload};
 
 use super::{MonitorEvent, PortError};
 
@@ -200,6 +200,41 @@ impl NotificationRequest {
     }
 
     #[must_use]
+    pub fn for_background_workload(workload: &BackgroundWorkload, view: NotificationView) -> Self {
+        let mut body = format!(
+            "Processes: {} (+{})\nRAM: {} MiB (+{} MiB)\nCPU: {:.1}%\nRunning for: {}\nReason: long-lived low-CPU application with growing or high memory use",
+            workload.process_count(),
+            workload.process_count_growth,
+            workload.total_memory_bytes / 1_048_576,
+            workload.memory_growth_bytes / 1_048_576,
+            workload.total_cpu_percent,
+            format_duration(workload.age),
+        );
+        if view == NotificationView::Details {
+            let executable = workload.root.executable().map_or_else(
+                || "unknown".to_owned(),
+                |path| escape_markup(&path.display().to_string()),
+            );
+            let _ = write!(
+                body,
+                "\nRoot PID: {}\nExecutable: {executable}\nObserved for: {}\nStop sends SIGTERM only to the reported application group",
+                workload.identity().pid(),
+                format_duration(workload.observed_for),
+            );
+        }
+        Self {
+            summary: format!(
+                "Background application is retaining memory: {} ({})",
+                workload.root.name(),
+                workload.identity().pid()
+            ),
+            body,
+            actions: true,
+            view,
+        }
+    }
+
+    #[must_use]
     pub const fn has_actions(&self) -> bool {
         self.actions
     }
@@ -225,6 +260,7 @@ pub struct NotificationBinding {
 enum NotificationSubject {
     Process(MonitorEvent),
     Workload(StaleWorkload),
+    BackgroundWorkload(BackgroundWorkload),
 }
 
 impl NotificationBinding {
@@ -245,10 +281,21 @@ impl NotificationBinding {
     }
 
     #[must_use]
+    pub const fn for_background_workload(
+        workload: BackgroundWorkload,
+        view: NotificationView,
+    ) -> Self {
+        Self {
+            subject: NotificationSubject::BackgroundWorkload(workload),
+            view,
+        }
+    }
+
+    #[must_use]
     pub const fn event(&self) -> Option<&MonitorEvent> {
         match &self.subject {
             NotificationSubject::Process(event) => Some(event),
-            NotificationSubject::Workload(_) => None,
+            NotificationSubject::Workload(_) | NotificationSubject::BackgroundWorkload(_) => None,
         }
     }
 
@@ -256,7 +303,15 @@ impl NotificationBinding {
     pub const fn workload(&self) -> Option<&StaleWorkload> {
         match &self.subject {
             NotificationSubject::Workload(workload) => Some(workload),
-            NotificationSubject::Process(_) => None,
+            NotificationSubject::Process(_) | NotificationSubject::BackgroundWorkload(_) => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn background_workload(&self) -> Option<&BackgroundWorkload> {
+        match &self.subject {
+            NotificationSubject::BackgroundWorkload(workload) => Some(workload),
+            NotificationSubject::Process(_) | NotificationSubject::Workload(_) => None,
         }
     }
 
@@ -271,6 +326,9 @@ impl NotificationBinding {
             NotificationSubject::Process(event) => NotificationRequest::for_view(event, self.view),
             NotificationSubject::Workload(workload) => {
                 NotificationRequest::for_stale_workload(workload, self.view)
+            }
+            NotificationSubject::BackgroundWorkload(workload) => {
+                NotificationRequest::for_background_workload(workload, self.view)
             }
         }
     }
@@ -351,6 +409,22 @@ fn escape_markup(value: &str) -> String {
         .replace('>', "&gt;")
 }
 
+fn format_duration(duration: std::time::Duration) -> String {
+    let total_seconds = duration.as_secs();
+    let days = total_seconds / 86_400;
+    let hours = (total_seconds % 86_400) / 3_600;
+    let minutes = (total_seconds % 3_600) / 60;
+    if days > 0 {
+        format!("{days}d {hours}h {minutes}m")
+    } else if hours > 0 {
+        format!("{hours}h {minutes}m")
+    } else if minutes > 0 {
+        format!("{minutes}m")
+    } else {
+        format!("{total_seconds}s")
+    }
+}
+
 pub trait NotificationSink {
     fn notify(
         &mut self,
@@ -373,9 +447,9 @@ mod tests {
     use crate::{
         application::{MonitorEvent, PortError},
         domain::{
-            MemoryPressureEvaluation, MemoryPressureLevel, MemoryPressureSample, MemoryPsi,
-            ProcessDescriptor, ProcessIdentity, ProcessResources, ResourceBreach, StaleWorkload,
-            SystemResources, WorkloadMember,
+            BackgroundWorkload, MemoryPressureEvaluation, MemoryPressureLevel,
+            MemoryPressureSample, MemoryPsi, ProcessDescriptor, ProcessIdentity, ProcessResources,
+            ResourceBreach, StaleWorkload, SystemResources, WorkloadMember,
         },
     };
 
@@ -413,6 +487,25 @@ mod tests {
             total_memory_bytes: 256 * 1_048_576,
             total_cpu_percent: 0.2,
             age: Duration::from_hours(2),
+        }
+    }
+
+    fn background_workload() -> BackgroundWorkload {
+        let event = event();
+        BackgroundWorkload {
+            group_id: "systemd-unit:app-1.scope".to_owned(),
+            root: event.process.clone(),
+            members: vec![WorkloadMember {
+                process: event.process,
+                resources: event.resources,
+                depth: 0,
+            }],
+            total_memory_bytes: 256 * 1_048_576,
+            total_cpu_percent: 1.2,
+            age: Duration::from_mins(2 * 24 * 60 + 3 * 60 + 14),
+            observed_for: Duration::from_mins(30),
+            memory_growth_bytes: 128 * 1_048_576,
+            process_count_growth: 2,
         }
     }
 
@@ -505,6 +598,77 @@ mod tests {
         assert!(request.body().contains("Action: SIGTERM sent"));
         assert!(request.body().contains("Automatic action: permitted"));
         assert!(!request.has_actions());
+    }
+
+    #[test]
+    fn background_workload_notification_contains_name_pid_memory_and_growth() {
+        let request = NotificationRequest::for_background_workload(
+            &background_workload(),
+            NotificationView::Summary,
+        );
+
+        assert!(
+            request
+                .summary()
+                .contains("Background application is retaining memory: worker (42)")
+        );
+        assert!(request.body().contains("Processes: 1 (+2)"));
+        assert!(request.body().contains("RAM: 256 MiB (+128 MiB)"));
+        assert!(request.body().contains("CPU: 1.2%"));
+        assert!(request.body().contains("Running for: 2d 3h 14m"));
+        assert!(request.has_actions());
+    }
+
+    #[test]
+    fn background_details_include_escaped_executable_and_durations() {
+        let request = NotificationRequest::for_background_workload(
+            &background_workload(),
+            NotificationView::Details,
+        );
+
+        assert!(request.body().contains("Root PID: 42"));
+        assert!(request.body().contains("Executable: /usr/bin/worker"));
+        assert!(request.body().contains("Observed for: 30m"));
+        assert!(
+            request
+                .body()
+                .contains("Stop sends SIGTERM only to the reported application group")
+        );
+    }
+
+    #[test]
+    fn background_executable_is_markup_escaped() {
+        let mut workload = background_workload();
+        workload.root = ProcessDescriptor::new(
+            workload.root.identity(),
+            "worker",
+            Some(PathBuf::from("/tmp/<worker&helper>")),
+        );
+
+        let request =
+            NotificationRequest::for_background_workload(&workload, NotificationView::Details);
+
+        assert!(request.body().contains("/tmp/&lt;worker&amp;helper&gt;"));
+    }
+
+    #[test]
+    fn background_binding_preserves_identity_across_navigation() {
+        let summary = NotificationBinding::for_background_workload(
+            background_workload(),
+            NotificationView::Summary,
+        );
+        let identity = summary.background_workload().unwrap().identity();
+
+        let details = summary.transition(NotificationAction::Details).unwrap();
+        assert_eq!(details.view(), NotificationView::Details);
+        assert_eq!(details.background_workload().unwrap().identity(), identity);
+
+        let restored = details.transition(NotificationAction::Back).unwrap();
+        assert_eq!(restored.view(), NotificationView::Summary);
+        assert_eq!(restored.background_workload().unwrap().identity(), identity);
+        assert!(restored.background_workload().is_some());
+        assert!(restored.workload().is_none());
+        assert!(restored.event().is_none());
     }
 
     #[test]

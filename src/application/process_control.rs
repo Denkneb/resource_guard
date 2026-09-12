@@ -1,6 +1,6 @@
 use std::{error::Error, fmt, time::Duration};
 
-use crate::domain::{ProcessDisposition, ProcessIdentity, ProtectionPolicy, StaleWorkload};
+use crate::domain::{ProcessDisposition, ProcessIdentity, ProtectionPolicy};
 
 use super::{
     ForceTerminationPort, MonotonicClock, PortError, ProcessSource, Sleeper, TerminationPort,
@@ -101,22 +101,37 @@ where
         }
     }
 
-    /// Revalidates every identity and sends SIGTERM leaf-first, ending with the root.
+    /// Revalidates every identity, then sends SIGTERM leaf-first, ending with the root.
+    ///
+    /// The whole list is validated before the first signal, so an initially
+    /// protected, changed, or foreign process prevents every member from being
+    /// signalled. Each survivor is validated again immediately before its own
+    /// signal, so an `exec` into a protected program between the preflight and
+    /// the signal is not terminated.
     ///
     /// # Errors
     /// Returns the first ownership, identity, protection, inspection, or signalling error.
-    pub fn execute(&mut self, workload: &StaleWorkload) -> Result<usize, StopError> {
+    pub fn execute(
+        &mut self,
+        termination_order: impl IntoIterator<Item = ProcessIdentity>,
+    ) -> Result<usize, StopError> {
+        let mut validated = Vec::new();
+        for identity in termination_order {
+            match validate_process(self.source, identity, self.current_uid, self.protection) {
+                Ok(actual) => validated.push(actual),
+                Err(StopError::NotFound { .. }) => {}
+                Err(error) => return Err(error),
+            }
+        }
         let mut signalled = 0;
-        for identity in workload.termination_order() {
-            match StopProcess::new(
-                self.source,
-                self.terminator,
-                self.current_uid,
-                self.protection,
-            )
-            .execute(identity)
-            {
-                Ok(()) => signalled += 1,
+        for identity in validated {
+            match validate_process(self.source, identity, self.current_uid, self.protection) {
+                Ok(actual) => {
+                    self.terminator
+                        .terminate(actual)
+                        .map_err(StopError::Termination)?;
+                    signalled += 1;
+                }
                 Err(StopError::NotFound { .. }) => {}
                 Err(error) => return Err(error),
             }
@@ -505,7 +520,7 @@ mod tests {
             CURRENT_UID,
             &ProtectionPolicy::default(),
         )
-        .execute(&workload)
+        .execute(workload.termination_order())
         .unwrap();
 
         assert_eq!(count, 2);
@@ -517,6 +532,80 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![11, 10]
         );
+    }
+
+    #[test]
+    fn rejects_a_protected_root_before_signalling_any_member() {
+        struct TreeSource(HashMap<u32, ProcessDescriptor>);
+        impl ProcessSource for TreeSource {
+            fn snapshot(&mut self) -> Result<ResourceSnapshot, PortError> {
+                unreachable!("snapshot is not used by the stop use case")
+            }
+
+            fn find(&mut self, pid: u32) -> Result<Option<ProcessDescriptor>, PortError> {
+                Ok(self.0.get(&pid).cloned())
+            }
+        }
+
+        let root = descriptor(ProcessIdentity::new(10, CURRENT_UID, 10), "uv");
+        let child = descriptor(ProcessIdentity::new(11, CURRENT_UID, 11), "pytest");
+        let resources = ProcessResources {
+            cpu_percent: 0.0,
+            resident_memory_bytes: 100,
+            virtual_memory_bytes: 100,
+            running_for: Duration::from_hours(1),
+            observed_at: Duration::ZERO,
+        };
+        let workload = StaleWorkload {
+            root: root.clone(),
+            members: vec![
+                WorkloadMember {
+                    process: root.clone(),
+                    resources,
+                    depth: 0,
+                },
+                WorkloadMember {
+                    process: child.clone(),
+                    resources,
+                    depth: 1,
+                },
+            ],
+            total_memory_bytes: 200,
+            total_cpu_percent: 0.0,
+            age: Duration::from_hours(1),
+        };
+        let mut source = TreeSource(HashMap::from([
+            (root.identity().pid(), root),
+            (child.identity().pid(), child),
+        ]));
+        let mut terminator = FakeTerminator::default();
+        let protection = ProtectionPolicy::new(["uv".to_owned()], [], [], []);
+
+        let result = StopWorkload::new(&mut source, &mut terminator, CURRENT_UID, &protection)
+            .execute(workload.termination_order());
+
+        assert_eq!(result, Err(StopError::Protected { pid: 10 }));
+        assert!(terminator.terminated.is_empty());
+    }
+
+    #[test]
+    fn revalidates_each_member_immediately_before_signalling_it() {
+        let identity = ProcessIdentity::new(10, CURRENT_UID, 10);
+        let mut source = SequenceSource {
+            responses: VecDeque::from([
+                Some(descriptor(identity, "worker")),
+                Some(descriptor(identity, "desktop")),
+            ]),
+            fallback: None,
+        };
+        let mut terminator = FakeTerminator::default();
+        let protection = ProtectionPolicy::new(["desktop".to_owned()], [], [], []);
+
+        let result = StopWorkload::new(&mut source, &mut terminator, CURRENT_UID, &protection)
+            .execute([identity]);
+
+        assert_eq!(result, Err(StopError::Protected { pid: 10 }));
+        assert!(terminator.terminated.is_empty());
     }
 
     #[test]

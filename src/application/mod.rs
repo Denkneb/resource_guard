@@ -1,3 +1,4 @@
+mod background_workloads;
 mod config;
 mod emergency;
 mod memory_pressure;
@@ -7,9 +8,13 @@ mod ports;
 mod process_control;
 mod stale_workloads;
 
+pub use background_workloads::{
+    BackgroundWorkloadService, background_workload_from_root, build_background_workloads,
+};
 pub use config::{
-    ConfigValidationError, EmergencySettings, MemoryPressureSettings, MonitorSettings,
-    NotificationSettings, ProcessSettings, Settings, StaleWorkloadSettings, TerminationSettings,
+    BackgroundWorkloadSettings, ConfigValidationError, EmergencySettings, MemoryPressureSettings,
+    MonitorSettings, NotificationSettings, ProcessSettings, Settings, StaleWorkloadSettings,
+    TerminationSettings,
 };
 pub use emergency::EmergencyService;
 pub use memory_pressure::MemoryPressureMonitor;

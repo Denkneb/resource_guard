@@ -18,6 +18,8 @@ The project is Linux-only. It does not require root privileges and is distribute
 - `status` and daemon-backed `top` commands;
 - detection of old, low-CPU test/tool workload trees during memory pressure;
 - daemon-backed `stale` inspection and confirmed, leaf-first `stop-tree` termination;
+- detection of old, low-CPU background applications that grow or retain memory (RSS or process count);
+- daemon-backed `background` inspection and confirmed `stop-background` termination;
 - PID reuse protection using PID, UID, and Linux process start time;
 - foreground daemon suitable for a `systemd --user` service.
 - opt-in emergency termination of allowlisted or largest unprotected current-user processes.
@@ -40,16 +42,16 @@ cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo test --locked --all-targets --all-features
 ```
 
-The measured release daemon uses 5.99 MiB peak RSS and averages 0.498% of one logical CPU core in the current 60-second normal-pressure baseline. See [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md) for the environment, methodology, limitations, and reproduction script.
+The measured release daemon uses 8.00 MiB peak RSS and averages 0.779% of one logical CPU core in the current 60-second baseline. See [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md) for the environment, methodology, limitations, and reproduction script.
 
 ## Install a published release
 
 Release archives currently target 64-bit glibc-based Linux (`x86_64-unknown-linux-gnu`). Download the archive and its `.sha256` file from the corresponding GitHub release, then verify and extract it:
 
 ```console
-sha256sum --check resource-guard-0.3.0-x86_64-unknown-linux-gnu.tar.gz.sha256
-tar -xzf resource-guard-0.3.0-x86_64-unknown-linux-gnu.tar.gz
-cd resource-guard-0.3.0-x86_64-unknown-linux-gnu
+sha256sum --check resource-guard-0.4.0-x86_64-unknown-linux-gnu.tar.gz.sha256
+tar -xzf resource-guard-0.4.0-x86_64-unknown-linux-gnu.tar.gz
+cd resource-guard-0.4.0-x86_64-unknown-linux-gnu
 ```
 
 Install the extracted binary and user service without `sudo`:
@@ -157,6 +159,21 @@ This feature is notification-only by default and never sends a signal automatica
 
 All thresholds, candidate and launcher names, ignored root names, sample count, and notification cooldown are available under `[stale_workloads]` in [`config.example.toml`](config.example.toml).
 
+## Background application detection
+
+Resource Guard can detect old, low-CPU background applications that gradually grow their aggregate resident memory or child-process count. Processes are grouped by their systemd application scope (the `app.slice` scopes a desktop session creates for launched applications) so that a whole application is reported as one unit, including the `SIGTERM` action and memory estimate.
+
+A group becomes a candidate only when every included process belongs to the current user, the root process is not protected or ignored, the group is classified as a user application, no member has a controlling terminal, the root executable is known, and the root is not a generic interactive launcher such as `bash`, `sh`, `zsh`, `fish`, `dash`, `tmux`, `screen`, `xargs`, `python`, or `python3`. During normal pressure the detector additionally requires proof of growth (RSS growth, process-count growth, or total RSS above `large_memory_mib`) over the full `growth_window`. During warning, critical, or recovery pressure it also reports old, low-activity groups with noticeable RSS even when growth was not proven, so an application that is simply retaining memory can be offered when the system needs it.
+
+Classification limitations:
+
+- The group RSS is an estimate and may count shared pages more than once.
+- Growth history is kept only in daemon memory and is reset on restart; after a restart the full `growth_window` must elapse before growth is considered proven.
+- Current-user processes cannot always be reliably distinguished from desktop-session components, so unknown and service scopes are deliberately excluded.
+- The `Stop` action sends only `SIGTERM` and only to the exact identities from the reported snapshot; there is no `SIGKILL` for background groups.
+
+This feature never terminates a process automatically. It only reports candidates and performs an action that the user explicitly chooses. All thresholds, growth window, sample interval, sample count, CPU limit, cooldown, and ignored root names/executables are available under `[background_workloads]` in [`config.example.toml`](config.example.toml).
+
 ## CLI
 
 Run the daemon in the foreground:
@@ -189,6 +206,20 @@ Gracefully stop a reported tree after typing its exact root PID:
 ```console
 resource-guard stop-tree ROOT_PID
 ```
+
+Show background applications that are growing or retaining memory:
+
+```console
+resource-guard background
+```
+
+Gracefully stop a reported background application group after typing its exact root PID:
+
+```console
+resource-guard stop-background ROOT_PID
+```
+
+`stop-background` revalidates the root PID, UID, and Linux start time plus the exact group reported by the daemon against a fresh local snapshot, and refuses to send any signal if either changed. It then sends only `SIGTERM` to the reported group.
 
 Gracefully stop a process:
 

@@ -1,6 +1,7 @@
 use std::{collections::HashSet, time::Duration};
 
-use super::{ProcessDescriptor, ProcessIdentity, ProcessResources};
+use super::workload::{WorkloadMember, termination_order};
+use super::{ProcessDescriptor, ProcessIdentity};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct StaleWorkloadPolicy {
@@ -14,13 +15,6 @@ pub struct StaleWorkloadPolicy {
     pub maximum_cpu_percent: f32,
     pub consecutive_samples: u32,
     pub notification_cooldown: Duration,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct WorkloadMember {
-    pub process: ProcessDescriptor,
-    pub resources: ProcessResources,
-    pub depth: usize,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -45,19 +39,6 @@ impl StaleWorkload {
 
     #[must_use]
     pub fn termination_order(&self) -> Vec<ProcessIdentity> {
-        let mut members = self.members.iter().collect::<Vec<_>>();
-        members.sort_by(|left, right| {
-            right.depth.cmp(&left.depth).then_with(|| {
-                right
-                    .process
-                    .identity()
-                    .pid()
-                    .cmp(&left.process.identity().pid())
-            })
-        });
-        members
-            .into_iter()
-            .map(|member| member.process.identity())
-            .collect()
+        termination_order(self.identity(), &self.members)
     }
 }

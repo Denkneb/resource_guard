@@ -22,9 +22,9 @@ use crate::{
         TomlConfigRepository, ZbusNotificationSink, current_user_id,
     },
     application::{
-        EmergencyService, ForceStopProcess, MemoryPressureMonitor, MonitorService,
-        NotificationAction, NotificationBinding, NotificationBindings, NotificationEvent,
-        NotificationRequest, NotificationSink, NotificationView, ProcessSource,
+        BackgroundWorkloadService, EmergencyService, ForceStopProcess, MemoryPressureMonitor,
+        MonitorService, NotificationAction, NotificationBinding, NotificationBindings,
+        NotificationEvent, NotificationRequest, NotificationSink, NotificationView, ProcessSource,
         StaleWorkloadService, StopProcess, StopWorkload,
     },
     domain::{
@@ -36,7 +36,10 @@ use crate::{
 use super::{
     RuntimeError,
     paths::{control_socket_path, prepare_runtime_directory},
-    protocol::{ControlRequest, ControlResponse, StaleResponse, StatusResponse, TopResponse},
+    protocol::{
+        BackgroundResponse, ControlRequest, ControlResponse, StaleResponse, StatusResponse,
+        TopResponse,
+    },
     state::DaemonState,
 };
 
@@ -93,6 +96,16 @@ pub fn query_stale() -> Result<StaleResponse, RuntimeError> {
     build_runtime()?.block_on(query_stale_async())
 }
 
+/// Fetches background application workloads currently reported by the daemon.
+///
+/// # Errors
+///
+/// Returns an error when the runtime path is unavailable, the daemon cannot be
+/// reached, or its response is invalid.
+pub fn query_background() -> Result<BackgroundResponse, RuntimeError> {
+    build_runtime()?.block_on(query_background_async())
+}
+
 fn build_runtime() -> Result<tokio::runtime::Runtime, RuntimeError> {
     Builder::new_current_thread()
         .enable_all()
@@ -136,6 +149,11 @@ async fn run_daemon_async() -> Result<(), RuntimeError> {
     );
     let mut stale_workloads =
         StaleWorkloadService::new(current_user_id(), settings.stale_workload_policy());
+    let mut background_workloads = BackgroundWorkloadService::new(
+        current_user_id(),
+        settings.protection_policy(),
+        settings.background_workload_policy(),
+    );
     let emergency_epoch = std::time::Instant::now();
     let mut pending_emergency = None;
     let mut last_emergency_scan = None;
@@ -184,6 +202,7 @@ async fn run_daemon_async() -> Result<(), RuntimeError> {
                     Ok(report) => record_monitor_report(
                         report,
                         &mut stale_workloads,
+                        &mut background_workloads,
                         emergency_epoch.elapsed(),
                         &mut notifier,
                         &mut notification_bindings,
@@ -213,6 +232,7 @@ async fn run_daemon_async() -> Result<(), RuntimeError> {
                             &mut notification_bindings,
                             &mut monitor,
                             &mut stale_workloads,
+                            &mut background_workloads,
                             emergency_epoch.elapsed(),
                             &mut notifier,
                             &repository,
@@ -480,9 +500,11 @@ async fn record_poll_error(state: &Arc<RwLock<DaemonState>>, error: crate::appli
     state.write().await.record_error(error.to_string());
 }
 
+#[allow(clippy::too_many_lines)]
 async fn record_monitor_report(
     report: crate::application::MonitorReport,
     stale_service: &mut StaleWorkloadService,
+    background_service: &mut BackgroundWorkloadService,
     now: Duration,
     notifier: &mut Option<ZbusNotificationSink>,
     bindings: &mut NotificationBindings,
@@ -566,6 +588,53 @@ async fn record_monitor_report(
             }
         }
     }
+    let (background_candidates, background_notifications) =
+        background_service.evaluate(&report.inventory, pressure, now);
+    state
+        .write()
+        .await
+        .record_background_workloads(&background_candidates);
+    for workload in background_notifications {
+        warn!(
+            pid = workload.identity().pid(),
+            process = workload.root.name(),
+            process_count = workload.process_count(),
+            memory_bytes = workload.total_memory_bytes,
+            growth_bytes = workload.memory_growth_bytes,
+            age_seconds = workload.age.as_secs(),
+            "background application workload detected"
+        );
+        if let Some(sink) = notifier.as_mut() {
+            match sink
+                .notify(
+                    NotificationRequest::for_background_workload(
+                        &workload,
+                        NotificationView::Summary,
+                    ),
+                    None,
+                )
+                .await
+            {
+                Ok(notification_id) => bindings.remember(
+                    notification_id,
+                    NotificationBinding::for_background_workload(
+                        workload,
+                        NotificationView::Summary,
+                    ),
+                ),
+                Err(error) => {
+                    warn!(%error, "background workload notification failed");
+                    state
+                        .write()
+                        .await
+                        .record_notification_error(error.to_string());
+                    bindings.clear();
+                    *notifier = None;
+                    break;
+                }
+            }
+        }
+    }
     state.write().await.record_report(&report);
 }
 
@@ -605,6 +674,7 @@ async fn handle_notification_event(
     bindings: &mut NotificationBindings,
     monitor: &mut MonitorService<SysinfoProcessSource, SystemClock>,
     stale_service: &mut StaleWorkloadService,
+    background_service: &mut BackgroundWorkloadService,
     now: Duration,
     notifier: &mut Option<ZbusNotificationSink>,
     repository: &TomlConfigRepository,
@@ -668,13 +738,26 @@ async fn handle_notification_event(
             if let Some(workload) = binding.workload() {
                 let identity = workload.identity();
                 match StopWorkload::new(&mut source, &mut terminator, current_user_id(), &policy)
-                    .execute(workload)
+                    .execute(workload.termination_order())
                 {
                     Ok(count) => info!(
                         pid = identity.pid(),
                         count, "SIGTERM sent to stale workload"
                     ),
                     Err(error) => warn!(pid = identity.pid(), %error, "workload stop rejected"),
+                }
+            } else if let Some(background) = binding.background_workload() {
+                let identity = background.identity();
+                match StopWorkload::new(&mut source, &mut terminator, current_user_id(), &policy)
+                    .execute(background.termination_order())
+                {
+                    Ok(count) => info!(
+                        pid = identity.pid(),
+                        count, "SIGTERM sent to background workload"
+                    ),
+                    Err(error) => {
+                        warn!(pid = identity.pid(), %error, "background workload stop rejected");
+                    }
                 }
             } else if let Some(monitored_event) = binding.event() {
                 let identity = monitored_event.process.identity();
@@ -698,6 +781,12 @@ async fn handle_notification_event(
                     pid = workload.identity().pid(),
                     "workload ignored for one hour"
                 );
+            } else if let Some(background) = binding.background_workload() {
+                background_service.ignore_for(background.identity(), now + Duration::from_hours(1));
+                info!(
+                    pid = background.identity().pid(),
+                    "background workload ignored for one hour"
+                );
             } else if let Some(monitored_event) = binding.event() {
                 monitor.ignore_for(monitored_event.process.identity(), Duration::from_hours(1));
                 info!(
@@ -710,6 +799,11 @@ async fn handle_notification_event(
             let mut updated = settings.clone();
             if let Some(workload) = binding.workload() {
                 updated.add_stale_workload_ignore(workload.root.name().to_owned());
+            } else if let Some(background) = binding.background_workload() {
+                updated.add_background_workload_ignore(
+                    background.root.name(),
+                    background.root.executable(),
+                );
             } else if let Some(monitored_event) = binding.event() {
                 updated.add_ignore_rule(IgnoreRule::for_process(&monitored_event.process));
             }
@@ -722,8 +816,15 @@ async fn handle_notification_event(
                             pid = workload.identity().pid(),
                             "workload permanently ignored"
                         );
+                    } else if let Some(background) = binding.background_workload() {
+                        background_service.ignore_process(&background.root);
+                        info!(
+                            pid = background.identity().pid(),
+                            "background workload permanently ignored"
+                        );
                     } else if let Some(monitored_event) = binding.event() {
                         monitor.ignore_permanently(&monitored_event.process);
+                        background_service.replace_protection_policy(settings.protection_policy());
                         info!(
                             pid = monitored_event.process.identity().pid(),
                             "process permanently ignored"
@@ -889,6 +990,9 @@ async fn handle_client(
         Ok(ControlRequest::Stale) => ControlResponse::Stale {
             stale: state.read().await.stale(),
         },
+        Ok(ControlRequest::Background) => ControlResponse::Background {
+            background: state.read().await.background(),
+        },
         Err(error) => ControlResponse::Error {
             message: format!("invalid request: {error}"),
         },
@@ -922,6 +1026,9 @@ async fn query_status_async() -> Result<StatusResponse, RuntimeError> {
         ControlResponse::Stale { .. } => Err(RuntimeError::Protocol(
             "daemon returned stale data for a status request".to_owned(),
         )),
+        ControlResponse::Background { .. } => Err(RuntimeError::Protocol(
+            "daemon returned background data for a status request".to_owned(),
+        )),
     }
 }
 
@@ -935,6 +1042,9 @@ async fn query_top_async() -> Result<TopResponse, RuntimeError> {
         ControlResponse::Stale { .. } => Err(RuntimeError::Protocol(
             "daemon returned stale data for a top request".to_owned(),
         )),
+        ControlResponse::Background { .. } => Err(RuntimeError::Protocol(
+            "daemon returned background data for a top request".to_owned(),
+        )),
     }
 }
 
@@ -947,6 +1057,25 @@ async fn query_stale_async() -> Result<StaleResponse, RuntimeError> {
         )),
         ControlResponse::Top { .. } => Err(RuntimeError::Protocol(
             "daemon returned top data for a stale request".to_owned(),
+        )),
+        ControlResponse::Background { .. } => Err(RuntimeError::Protocol(
+            "daemon returned background data for a stale request".to_owned(),
+        )),
+    }
+}
+
+async fn query_background_async() -> Result<BackgroundResponse, RuntimeError> {
+    match query(ControlRequest::Background).await? {
+        ControlResponse::Background { background } => Ok(background),
+        ControlResponse::Error { message } => Err(RuntimeError::Protocol(message)),
+        ControlResponse::Status { .. } => Err(RuntimeError::Protocol(
+            "daemon returned status data for a background request".to_owned(),
+        )),
+        ControlResponse::Top { .. } => Err(RuntimeError::Protocol(
+            "daemon returned top data for a background request".to_owned(),
+        )),
+        ControlResponse::Stale { .. } => Err(RuntimeError::Protocol(
+            "daemon returned stale data for a background request".to_owned(),
         )),
     }
 }

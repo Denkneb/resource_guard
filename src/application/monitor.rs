@@ -6,7 +6,7 @@ use crate::domain::{
     ViolationPolicy, ViolationTracker,
 };
 
-use super::{MonotonicClock, PortError, ProcessSource};
+use super::{MonotonicClock, ObservedProcess, PortError, ProcessSource};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct MonitorEvent {
@@ -29,6 +29,7 @@ pub struct MonitorReport {
     pub monitored_processes: usize,
     pub processes: Vec<MonitoredProcess>,
     pub events: Vec<MonitorEvent>,
+    pub inventory: Vec<ObservedProcess>,
 }
 
 /// Application use case which evaluates resource snapshots against domain policy.
@@ -93,14 +94,14 @@ where
     pub fn poll(&mut self) -> Result<MonitorReport, PortError> {
         let now = self.clock.now();
         self.temporary_ignores.remove_expired(now);
-        let snapshot = self.source.snapshot()?;
+        let mut snapshot = self.source.snapshot()?;
         let observed_processes = snapshot.processes.len();
         let mut active_identities = HashSet::new();
         let mut monitored_processes = 0;
         let mut processes = Vec::new();
         let mut events = Vec::new();
 
-        for observed in snapshot.processes {
+        for observed in &snapshot.processes {
             let identity = observed.descriptor.identity();
             if identity.uid() != self.current_uid
                 || self.protection.disposition(&observed.descriptor) != ProcessDisposition::Monitor
@@ -123,7 +124,10 @@ where
                     exceeded_for: elapsed,
                 });
             }
-            processes.push(MonitoredProcess { observed, breach });
+            processes.push(MonitoredProcess {
+                observed: observed.clone(),
+                breach,
+            });
         }
 
         for stale in self.tracked_identities.difference(&active_identities) {
@@ -137,6 +141,7 @@ where
             monitored_processes,
             processes,
             events,
+            inventory: std::mem::take(&mut snapshot.processes),
         })
     }
 }
@@ -306,5 +311,28 @@ mod tests {
         service.ignore_permanently(&descriptor);
 
         assert_eq!(service.poll().unwrap().monitored_processes, 0);
+    }
+
+    #[test]
+    fn inventory_keeps_other_uid_and_ignored_processes_out_of_the_monitored_subset() {
+        let protection =
+            ProtectionPolicy::new(["desktop".to_owned()], [], ["compiler".to_owned()], []);
+        let (mut service, _) = service(
+            vec![
+                observed(42, CURRENT_UID, "worker"),
+                observed(43, CURRENT_UID + 1, "foreign"),
+                observed(44, CURRENT_UID, "desktop"),
+                observed(45, CURRENT_UID, "compiler"),
+            ],
+            protection,
+        );
+
+        let report = service.poll().unwrap();
+
+        assert_eq!(report.observed_processes, 4);
+        assert_eq!(report.inventory.len(), 4);
+        assert_eq!(report.monitored_processes, 1);
+        assert_eq!(report.processes.len(), 1);
+        assert_eq!(report.processes[0].observed.descriptor.identity().pid(), 42);
     }
 }

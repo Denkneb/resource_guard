@@ -43,6 +43,9 @@ fn config_show_prints_effective_defaults() {
     assert!(stdout.contains("critical_poll_interval_ms = 500"));
     assert!(stdout.contains("[emergency]"));
     assert!(stdout.contains("action = \"notify_only\""));
+    assert!(stdout.contains("[background_workloads]"));
+    assert!(stdout.contains("minimum_process_count_growth = 2"));
+    assert!(stdout.contains("growth_window_minutes = 30"));
 }
 
 #[test]

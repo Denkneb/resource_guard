@@ -221,6 +221,47 @@ fn stale_reports_an_empty_snapshot_when_detection_is_disabled() {
 }
 
 #[test]
+fn background_reports_an_empty_snapshot_when_detection_is_disabled() {
+    let directory = tempfile::tempdir().unwrap();
+    fs::write(
+        directory.path().join("config.toml"),
+        "[background_workloads]\nenabled = false\n",
+    )
+    .unwrap();
+    let _daemon = start_daemon(&directory);
+
+    let output = isolated_command(&directory)
+        .arg("background")
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap().trim(),
+        "no growing background applications detected"
+    );
+}
+
+#[test]
+fn daemon_starts_with_a_partial_config() {
+    let directory = tempfile::tempdir().unwrap();
+    fs::write(
+        directory.path().join("config.toml"),
+        "[monitor]\npoll_interval_seconds = 5\n",
+    )
+    .unwrap();
+    let _daemon = start_daemon(&directory);
+
+    let output = isolated_command(&directory).arg("status").output().unwrap();
+    assert!(output.status.success());
+    assert!(
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .contains("daemon: running")
+    );
+}
+
+#[test]
 fn top_watch_renders_the_terminal_view() {
     let directory = tempfile::tempdir().unwrap();
     let _daemon = start_daemon(&directory);

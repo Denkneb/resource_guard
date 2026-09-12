@@ -7,6 +7,14 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-12
+
+### Added
+
+- Added detection of old, low-CPU background applications that grow or retain memory, grouped by their systemd application scope, with RSS and process-count growth history held only in daemon memory.
+- Added actionable background notifications with details, one-hour ignore, persistent executable/name ignore, and a safe leaf-first `SIGTERM` stop.
+- Added daemon-backed `background` inspection and an exact-PID-confirmed `stop-background` command.
+
 ## [0.3.0] - 2026-09-04
 
 ### Added
@@ -68,7 +76,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - Unit, adapter, CLI, process-signalling, packaging, and resource-baseline tests.
 - CI, dependency policy checks, Dependabot, and local pre-commit/pre-push hooks.
 
-[Unreleased]: https://github.com/Denkneb/resource_guard/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/Denkneb/resource_guard/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/Denkneb/resource_guard/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/Denkneb/resource_guard/compare/v0.2.2...v0.3.0
 [0.2.2]: https://github.com/Denkneb/resource_guard/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/Denkneb/resource_guard/compare/v0.2.0...v0.2.1

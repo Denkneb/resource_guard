@@ -1,8 +1,9 @@
-use std::{error::Error, fmt, path::PathBuf, time::Duration};
+use std::{error::Error, fmt, path::Path, path::PathBuf, time::Duration};
 
 use crate::domain::{
-    EmergencyAction, EmergencyActivationPolicy, EmergencyPolicy, IgnoreRule, MemoryPressurePolicy,
-    ProtectionPolicy, StaleWorkloadPolicy, Thresholds, ViolationPolicy,
+    BackgroundWorkloadPolicy, EmergencyAction, EmergencyActivationPolicy, EmergencyPolicy,
+    IgnoreRule, MemoryPressurePolicy, ProtectionPolicy, StaleWorkloadPolicy, Thresholds,
+    ViolationPolicy,
 };
 
 const BYTES_PER_MIB: u64 = 1_048_576;
@@ -13,6 +14,7 @@ pub struct Settings {
     pub memory_pressure: MemoryPressureSettings,
     pub emergency: EmergencySettings,
     pub stale_workloads: StaleWorkloadSettings,
+    pub background_workloads: BackgroundWorkloadSettings,
     pub termination: TerminationSettings,
     pub processes: ProcessSettings,
     pub notifications: NotificationSettings,
@@ -24,6 +26,7 @@ impl Settings {
     /// # Errors
     ///
     /// Returns the first invalid setting.
+    #[allow(clippy::too_many_lines)]
     pub fn validate(&self) -> Result<(), ConfigValidationError> {
         if self.monitor.poll_interval.is_zero() {
             return Err(ConfigValidationError::ZeroPollInterval);
@@ -98,12 +101,30 @@ impl Settings {
         if self.notifications.timeout.is_zero() {
             return Err(ConfigValidationError::ZeroNotificationTimeout);
         }
+        if self.background_workloads.minimum_age.is_zero()
+            || self.background_workloads.minimum_memory_bytes == 0
+            || self.background_workloads.large_memory_bytes == 0
+            || self.background_workloads.growth_window.is_zero()
+            || self.background_workloads.minimum_memory_growth_bytes == 0
+            || self.background_workloads.sample_interval.is_zero()
+            || self.background_workloads.notification_cooldown.is_zero()
+            || self.background_workloads.consecutive_samples == 0
+            || self.background_workloads.minimum_process_count_growth == 0
+            || self.background_workloads.large_memory_bytes
+                < self.background_workloads.minimum_memory_bytes
+            || self.background_workloads.growth_window < self.background_workloads.sample_interval
+            || !self.background_workloads.maximum_cpu_percent.is_finite()
+            || self.background_workloads.maximum_cpu_percent < 0.0
+        {
+            return Err(ConfigValidationError::InvalidBackgroundWorkloadPolicy);
+        }
 
         for path in self
             .processes
             .protected_executables
             .iter()
             .chain(&self.processes.ignored_executables)
+            .chain(&self.background_workloads.ignored_root_executables)
         {
             if !path.is_absolute() {
                 return Err(ConfigValidationError::RelativeExecutable(path.clone()));
@@ -235,6 +256,60 @@ impl Settings {
             self.stale_workloads.ignored_root_names.push(name);
         }
     }
+
+    #[must_use]
+    pub fn background_workload_policy(&self) -> BackgroundWorkloadPolicy {
+        BackgroundWorkloadPolicy {
+            enabled: self.background_workloads.enabled,
+            minimum_age: self.background_workloads.minimum_age,
+            minimum_memory_bytes: self.background_workloads.minimum_memory_bytes,
+            large_memory_bytes: self.background_workloads.large_memory_bytes,
+            growth_window: self.background_workloads.growth_window,
+            minimum_memory_growth_bytes: self.background_workloads.minimum_memory_growth_bytes,
+            minimum_process_count_growth: self.background_workloads.minimum_process_count_growth,
+            maximum_cpu_percent: self.background_workloads.maximum_cpu_percent,
+            consecutive_samples: self.background_workloads.consecutive_samples,
+            sample_interval: self.background_workloads.sample_interval,
+            notification_cooldown: self.background_workloads.notification_cooldown,
+            ignored_root_names: self
+                .background_workloads
+                .ignored_root_names
+                .iter()
+                .cloned()
+                .collect(),
+            ignored_root_executables: self
+                .background_workloads
+                .ignored_root_executables
+                .iter()
+                .cloned()
+                .collect(),
+        }
+    }
+
+    /// Records a permanent background ignore, preferring the absolute executable
+    /// and falling back to the process name only when no executable is known.
+    pub fn add_background_workload_ignore(&mut self, name: &str, executable: Option<&Path>) {
+        if let Some(executable) = executable {
+            let executable = executable.to_path_buf();
+            if !self
+                .background_workloads
+                .ignored_root_executables
+                .contains(&executable)
+            {
+                self.background_workloads
+                    .ignored_root_executables
+                    .push(executable);
+            }
+        } else if !self
+            .background_workloads
+            .ignored_root_names
+            .contains(&name.to_owned())
+        {
+            self.background_workloads
+                .ignored_root_names
+                .push(name.to_owned());
+        }
+    }
 }
 
 const fn valid_percent(value: f32) -> bool {
@@ -356,6 +431,43 @@ impl Default for NotificationSettings {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct BackgroundWorkloadSettings {
+    pub enabled: bool,
+    pub minimum_age: Duration,
+    pub minimum_memory_bytes: u64,
+    pub large_memory_bytes: u64,
+    pub growth_window: Duration,
+    pub minimum_memory_growth_bytes: u64,
+    pub minimum_process_count_growth: usize,
+    pub maximum_cpu_percent: f32,
+    pub consecutive_samples: u32,
+    pub sample_interval: Duration,
+    pub notification_cooldown: Duration,
+    pub ignored_root_names: Vec<String>,
+    pub ignored_root_executables: Vec<PathBuf>,
+}
+
+impl Default for BackgroundWorkloadSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            minimum_age: Duration::from_mins(60),
+            minimum_memory_bytes: 256 * BYTES_PER_MIB,
+            large_memory_bytes: 512 * BYTES_PER_MIB,
+            growth_window: Duration::from_mins(30),
+            minimum_memory_growth_bytes: 128 * BYTES_PER_MIB,
+            minimum_process_count_growth: 2,
+            maximum_cpu_percent: 5.0,
+            consecutive_samples: 3,
+            sample_interval: Duration::from_secs(60),
+            notification_cooldown: Duration::from_mins(30),
+            ignored_root_names: Vec::new(),
+            ignored_root_executables: Vec::new(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct MonitorSettings {
     pub poll_interval: Duration,
     pub consecutive_samples: u32,
@@ -427,6 +539,7 @@ pub enum ConfigValidationError {
     ZeroEmergencyActionMemory,
     InvalidEmergencyPsiThreshold,
     InvalidStaleWorkloadPolicy,
+    InvalidBackgroundWorkloadPolicy,
     ZeroGracePeriod,
     ZeroNotificationTimeout,
     RelativeExecutable(PathBuf),
@@ -504,6 +617,10 @@ impl fmt::Display for ConfigValidationError {
                 formatter,
                 "stale workload thresholds, samples, durations, and CPU limit must be valid"
             ),
+            Self::InvalidBackgroundWorkloadPolicy => write!(
+                formatter,
+                "background workload thresholds, samples, durations, ordering, and CPU limit must be valid"
+            ),
             Self::ZeroGracePeriod => write!(formatter, "grace period must be greater than zero"),
             Self::ZeroNotificationTimeout => {
                 write!(formatter, "notification timeout must be greater than zero")
@@ -523,7 +640,7 @@ impl Error for ConfigValidationError {}
 mod tests {
     use std::{path::PathBuf, time::Duration};
 
-    use super::{ConfigValidationError, Settings};
+    use super::{BackgroundWorkloadSettings, ConfigValidationError, Settings};
 
     #[test]
     fn default_settings_are_valid() {
@@ -621,5 +738,84 @@ mod tests {
             settings.validate(),
             Err(ConfigValidationError::ZeroNotificationTimeout)
         );
+    }
+
+    #[test]
+    fn rejects_invalid_background_workload_policy() {
+        let mut settings = Settings::default();
+        settings.background_workloads.large_memory_bytes = 100;
+        assert_eq!(
+            settings.validate(),
+            Err(ConfigValidationError::InvalidBackgroundWorkloadPolicy)
+        );
+
+        settings.background_workloads = BackgroundWorkloadSettings::default();
+        settings.background_workloads.growth_window = Duration::from_secs(30);
+        settings.background_workloads.sample_interval = Duration::from_secs(60);
+        assert_eq!(
+            settings.validate(),
+            Err(ConfigValidationError::InvalidBackgroundWorkloadPolicy)
+        );
+
+        settings.background_workloads = BackgroundWorkloadSettings::default();
+        settings.background_workloads.maximum_cpu_percent = f32::NAN;
+        assert_eq!(
+            settings.validate(),
+            Err(ConfigValidationError::InvalidBackgroundWorkloadPolicy)
+        );
+    }
+
+    #[test]
+    fn rejects_relative_background_ignored_executable() {
+        let mut settings = Settings::default();
+        settings
+            .background_workloads
+            .ignored_root_executables
+            .push(PathBuf::from("bin/worker"));
+
+        assert_eq!(
+            settings.validate(),
+            Err(ConfigValidationError::RelativeExecutable(PathBuf::from(
+                "bin/worker"
+            )))
+        );
+    }
+
+    #[test]
+    fn background_ignore_prefers_executable_over_name() {
+        let mut settings = Settings::default();
+        settings.add_background_workload_ignore(
+            "worker",
+            Some(PathBuf::from("/usr/bin/worker").as_path()),
+        );
+
+        assert!(
+            settings
+                .background_workloads
+                .ignored_root_executables
+                .contains(&PathBuf::from("/usr/bin/worker"))
+        );
+        assert!(settings.background_workloads.ignored_root_names.is_empty());
+
+        settings.add_background_workload_ignore("shell", None);
+        assert!(
+            settings
+                .background_workloads
+                .ignored_root_names
+                .contains(&"shell".to_owned())
+        );
+    }
+
+    #[test]
+    fn exposes_a_background_workload_policy() {
+        let settings = Settings::default();
+        let policy = settings.background_workload_policy();
+
+        assert!(policy.enabled);
+        assert_eq!(policy.minimum_age, Duration::from_mins(60));
+        assert_eq!(policy.minimum_memory_bytes, 256 * 1_048_576);
+        assert_eq!(policy.large_memory_bytes, 512 * 1_048_576);
+        assert_eq!(policy.sample_interval, Duration::from_secs(60));
+        assert_eq!(policy.minimum_process_count_growth, 2);
     }
 }

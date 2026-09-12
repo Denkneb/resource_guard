@@ -9,19 +9,19 @@ The CPU value includes process scans and control-socket work. Between polling cy
 
 ## Baseline result
 
-The baseline was recorded on 2026-08-27 from the Resource Guard 0.2.0 emergency-mode change set:
+The baseline was recorded on 2026-09-12 from the Resource Guard 0.4.0 background-workload change set:
 
 | Measurement | Result |
 | --- | ---: |
-| Release binary size | 8,133,776 bytes (7.76 MiB) |
+| Release binary size | 8,617,296 bytes (8.22 MiB) |
 | Warm-up | 10 seconds |
-| Measurement window | 60.252 seconds |
-| Process CPU time | 0.300 seconds |
-| Average CPU | 0.498% of one logical core |
-| Peak RSS | 6,132 KiB (5.99 MiB) |
-| Processes in final snapshot | 779 observed, 214 monitored |
+| Measurement window | 60.333 seconds |
+| Process CPU time | 0.470 seconds |
+| Average CPU | 0.779% of one logical core |
+| Peak RSS | 8,188 KiB (8.00 MiB) |
+| Processes in final snapshot | 1,218 observed, 584 monitored |
 
-Both acceptance thresholds passed. The measurements were taken with Rust 1.98.0 on Linux 6.8.0-138-generic x86_64. The default `notify_only` emergency policy and normal five-second pressure interval were active. Results depend on the host, process count, pressure state, kernel, allocator, and build toolchain, so this is a baseline rather than a universal resource guarantee. Warning and critical modes intentionally poll more frequently and may use more CPU while the system is under memory pressure.
+Both acceptance thresholds passed. Across four consecutive standard runs of the same build, average CPU ranged from 0.779% to 0.912% and peak RSS from 8,124 KiB to 8,196 KiB. The measurements were taken with Rust 1.98.0 on Linux 6.8.0-139-generic x86_64. The default `notify_only` emergency policy and the five-second process polling interval were active; the host was in the warning memory-pressure state (about 11.75% available RAM) during the recorded run, which only affects the lightweight pressure poll. Background detection never terminates a process automatically. Results depend on the host, process count, pressure state, kernel, allocator, and build toolchain, so this is a baseline rather than a universal resource guarantee. Warning and critical pressure states poll the pressure source more frequently and may use more CPU while the system is under memory pressure.
 
 ## Reproducing the measurement
 

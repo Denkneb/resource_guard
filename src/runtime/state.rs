@@ -1,11 +1,16 @@
-use std::time::Instant;
+use std::{path::Path, time::Instant};
 
 use crate::application::MonitorReport;
-use crate::domain::{MemoryPressureEvaluation, MemoryPressureLevel, StaleWorkload};
+use crate::domain::{
+    BackgroundWorkload, MemoryPressureEvaluation, MemoryPressureLevel, StaleWorkload,
+};
 
 use super::{
     StatusResponse,
-    protocol::{StaleResponse, StaleWorkloadSummary, TopProcess, TopResponse},
+    protocol::{
+        BackgroundResponse, BackgroundWorkloadSummary, StaleResponse, StaleWorkloadSummary,
+        TopProcess, TopResponse,
+    },
 };
 
 #[derive(Debug)]
@@ -31,6 +36,7 @@ pub(crate) struct DaemonState {
     last_error: Option<String>,
     notification_error: Option<String>,
     stale_workloads: Vec<StaleWorkloadSummary>,
+    background_workloads: Vec<BackgroundWorkloadSummary>,
 }
 
 impl DaemonState {
@@ -57,6 +63,7 @@ impl DaemonState {
             last_error: None,
             notification_error: None,
             stale_workloads: Vec::new(),
+            background_workloads: Vec::new(),
         }
     }
 
@@ -176,6 +183,39 @@ impl DaemonState {
         }
     }
 
+    pub(crate) fn record_background_workloads(&mut self, workloads: &[BackgroundWorkload]) {
+        self.background_workloads = workloads
+            .iter()
+            .map(|workload| BackgroundWorkloadSummary {
+                group_id: workload.group_id.clone(),
+                root_pid: workload.identity().pid(),
+                root_uid: workload.identity().uid(),
+                root_started_at: workload.identity().started_at(),
+                name: workload.root.name().to_owned(),
+                executable: workload.root.executable().map(Path::to_path_buf),
+                process_count: workload.process_count(),
+                process_count_growth: workload.process_count_growth,
+                total_memory_bytes: workload.total_memory_bytes,
+                memory_growth_bytes: workload.memory_growth_bytes,
+                total_cpu_percent: normalize_cpu(workload.total_cpu_percent),
+                age_seconds: workload.age.as_secs(),
+                observed_for_seconds: workload.observed_for.as_secs(),
+            })
+            .collect();
+    }
+
+    pub(crate) fn background(&self) -> BackgroundResponse {
+        let mut workloads = self.background_workloads.clone();
+        workloads.sort_by(|left, right| {
+            right
+                .memory_growth_bytes
+                .cmp(&left.memory_growth_bytes)
+                .then_with(|| right.total_memory_bytes.cmp(&left.total_memory_bytes))
+                .then_with(|| left.root_pid.cmp(&right.root_pid))
+        });
+        BackgroundResponse { workloads }
+    }
+
     pub(crate) fn clear_notification_error(&mut self) {
         self.notification_error = None;
     }
@@ -203,6 +243,10 @@ const fn pressure_level_name(level: MemoryPressureLevel) -> &'static str {
         MemoryPressureLevel::Critical => "critical",
         MemoryPressureLevel::Recovery => "recovery",
     }
+}
+
+const fn normalize_cpu(value: f32) -> f32 {
+    if value.is_finite() { value } else { 0.0 }
 }
 
 #[cfg(test)]
@@ -259,6 +303,7 @@ mod tests {
             monitored_processes: 3,
             processes,
             events: Vec::new(),
+            inventory: Vec::new(),
         });
 
         let top = state.top();

@@ -15,10 +15,11 @@ use crate::{
         TomlConfigRepository, current_user_id,
     },
     application::{
-        ForceStopProcess, PortError, ProcessSource, StopAndWait, StopError, StopOutcome,
-        StopWorkload, WaitForExit, workload_from_root,
+        ForceStopProcess, ObservedProcess, PortError, ProcessSource, StopAndWait, StopError,
+        StopOutcome, StopWorkload, WaitForExit, background_workload_from_root, workload_from_root,
     },
-    runtime::{self, RuntimeError, TopResponse},
+    domain::{BackgroundWorkload, BackgroundWorkloadPolicy, ProcessIdentity, ProtectionPolicy},
+    runtime::{self, BackgroundResponse, BackgroundWorkloadSummary, RuntimeError, TopResponse},
 };
 
 #[derive(Debug, Parser)]
@@ -42,6 +43,10 @@ enum Command {
     },
     /// Show workload trees suspected to be stale.
     Stale,
+    /// Show background applications that are growing or retaining memory.
+    Background,
+    /// Gracefully stop a currently reported background application group.
+    StopBackground { root_pid: u32 },
     /// Inspect and manage configuration.
     Config {
         #[command(subcommand)]
@@ -88,6 +93,10 @@ pub enum CliError {
     TreeConfirmationRequired { pid: u32 },
     TreeConfirmationDeclined { pid: u32 },
     WorkloadNotReported(u32),
+    BackgroundWorkloadNotReported(u32),
+    BackgroundWorkloadChanged(u32),
+    BackgroundConfirmationRequired { pid: u32 },
+    BackgroundConfirmationDeclined { pid: u32 },
     ConfirmationIo(io::Error),
     Runtime(RuntimeError),
     Output(io::Error),
@@ -130,6 +139,24 @@ impl fmt::Display for CliError {
                 formatter,
                 "PID {pid} is not a stale workload currently reported by the daemon"
             ),
+            Self::BackgroundWorkloadNotReported(pid) => write!(
+                formatter,
+                "PID {pid} is not a background application currently reported by the daemon"
+            ),
+            Self::BackgroundWorkloadChanged(pid) => write!(
+                formatter,
+                "background application rooted at PID {pid} changed identity or group since it was reported"
+            ),
+            Self::BackgroundConfirmationRequired { pid } => write!(
+                formatter,
+                "stopping background application {pid} requires an interactive terminal"
+            ),
+            Self::BackgroundConfirmationDeclined { pid } => {
+                write!(
+                    formatter,
+                    "stopping background application {pid} was not confirmed"
+                )
+            }
             Self::ConfirmationIo(error) => {
                 write!(formatter, "cannot read SIGKILL confirmation: {error}")
             }
@@ -233,8 +260,10 @@ pub fn execute(cli: Cli) -> Result<(), CliError> {
         }
         Command::Top { watch } => execute_top(watch),
         Command::Stale => execute_stale(),
+        Command::Background => execute_background(),
         Command::Stop { pid, kill, yes } => execute_stop(pid, kill, yes),
         Command::StopTree { root_pid } => execute_stop_tree(root_pid),
+        Command::StopBackground { root_pid } => execute_stop_background(root_pid),
     }
 }
 
@@ -257,6 +286,120 @@ fn execute_stale() -> Result<(), CliError> {
         );
     }
     Ok(())
+}
+
+fn execute_background() -> Result<(), CliError> {
+    let background = runtime::query_background()?;
+    print!("{}", render_background(&background));
+    Ok(())
+}
+
+fn render_background(background: &BackgroundResponse) -> String {
+    if background.workloads.is_empty() {
+        return "no growing background applications detected\n".to_owned();
+    }
+    let mut output = String::from("ROOT PID   CPU      RAM      +GROWTH  AGE       PROCS NAME\n");
+    for workload in &background.workloads {
+        let executable = workload
+            .executable
+            .as_ref()
+            .map_or_else(|| "-".to_owned(), |path| path.display().to_string());
+        let _ = writeln!(
+            output,
+            "{:<10} {:>6.1}% {:>8} {:>8} {:>9} {:>4}(+{}) {} [{}]",
+            workload.root_pid,
+            workload.total_cpu_percent,
+            format_bytes(workload.total_memory_bytes),
+            format_bytes(workload.memory_growth_bytes),
+            format_duration(workload.age_seconds),
+            workload.process_count,
+            workload.process_count_growth,
+            workload.name,
+            executable,
+        );
+    }
+    output
+}
+
+fn execute_stop_background(root_pid: u32) -> Result<(), CliError> {
+    let response = runtime::query_background()?;
+    let summary = response
+        .workloads
+        .iter()
+        .find(|workload| workload.root_pid == root_pid)
+        .ok_or(CliError::BackgroundWorkloadNotReported(root_pid))?;
+
+    let repository = TomlConfigRepository::from_environment()?;
+    let settings = repository.load()?.settings;
+    let protection = settings.protection_policy();
+    let policy = settings.background_workload_policy();
+    let mut source = SysinfoProcessSource::new();
+    let snapshot = source.snapshot().map_err(CliError::Inspection)?;
+    let workload = background_workload_for_stop(
+        &snapshot.processes,
+        summary,
+        current_user_id(),
+        &protection,
+        &policy,
+    )
+    .ok_or(CliError::BackgroundWorkloadChanged(root_pid))?;
+
+    confirm_background_stop(&workload)?;
+
+    let mut terminator = PidfdTerminationPort;
+    let count = StopWorkload::new(&mut source, &mut terminator, current_user_id(), &protection)
+        .execute(workload.termination_order())?;
+    println!(
+        "sent SIGTERM to {count} processes in background application rooted at PID {root_pid}"
+    );
+    Ok(())
+}
+
+/// Rebuilds the reported background group from a fresh snapshot using the full
+/// daemon identity (PID, UID, start time) and the current protection/policy.
+fn background_workload_for_stop(
+    processes: &[ObservedProcess],
+    summary: &BackgroundWorkloadSummary,
+    current_uid: u32,
+    protection: &ProtectionPolicy,
+    policy: &BackgroundWorkloadPolicy,
+) -> Option<BackgroundWorkload> {
+    let expected =
+        ProcessIdentity::new(summary.root_pid, summary.root_uid, summary.root_started_at);
+    background_workload_from_root(
+        processes,
+        expected,
+        &summary.group_id,
+        current_uid,
+        protection,
+        policy,
+    )
+}
+
+fn confirm_background_stop(workload: &BackgroundWorkload) -> Result<(), CliError> {
+    let pid = workload.identity().pid();
+    if !io::stdin().is_terminal() {
+        return Err(CliError::BackgroundConfirmationRequired { pid });
+    }
+    let mut stderr = io::stderr().lock();
+    write!(
+        stderr,
+        "stop {} processes in {} background application ({pid}, {} MiB) with SIGTERM; type {pid} to confirm: ",
+        workload.process_count(),
+        workload.root.name(),
+        workload.total_memory_bytes / 1_048_576,
+    )
+    .map_err(CliError::ConfirmationIo)?;
+    stderr.flush().map_err(CliError::ConfirmationIo)?;
+    let mut confirmation = String::new();
+    io::stdin()
+        .read_line(&mut confirmation)
+        .map_err(CliError::ConfirmationIo)?;
+    if confirmation.trim() == pid.to_string() {
+        Ok(())
+    } else {
+        Err(CliError::BackgroundConfirmationDeclined { pid })
+    }
 }
 
 fn execute_stop_tree(root_pid: u32) -> Result<(), CliError> {
@@ -287,7 +430,7 @@ fn execute_stop_tree(root_pid: u32) -> Result<(), CliError> {
 
     let mut terminator = PidfdTerminationPort;
     let count = StopWorkload::new(&mut source, &mut terminator, current_user_id(), &protection)
-        .execute(&workload)?;
+        .execute(workload.termination_order())?;
     println!("sent SIGTERM to {count} processes in workload tree rooted at PID {root_pid}");
     Ok(())
 }
@@ -527,15 +670,22 @@ fn execute_config(command: Option<&ConfigCommand>) -> Result<(), CliError> {
 
 #[cfg(test)]
 mod tests {
-    use std::io::Cursor;
+    use std::{collections::HashSet, io::Cursor, path::PathBuf, time::Duration};
 
     use clap::Parser;
 
     use super::{
-        Cli, Command, ConfigCommand, format_bytes, format_duration, read_force_kill_confirmation,
-        render_top,
+        Cli, Command, ConfigCommand, background_workload_for_stop, format_bytes, format_duration,
+        read_force_kill_confirmation, render_background, render_top,
     };
-    use crate::runtime::{TopProcess, TopResponse};
+    use crate::{
+        application::ObservedProcess,
+        domain::{
+            BackgroundWorkloadPolicy, ProcessDescriptor, ProcessExecutionContext, ProcessIdentity,
+            ProcessOrigin, ProcessResources, ProcessState, ProtectionPolicy,
+        },
+        runtime::{BackgroundResponse, BackgroundWorkloadSummary, TopProcess, TopResponse},
+    };
 
     #[test]
     fn parses_config_without_a_nested_command() {
@@ -633,6 +783,60 @@ mod tests {
     }
 
     #[test]
+    fn parses_background_and_stop_background_commands() {
+        let background = Cli::try_parse_from(["resource-guard", "background"]).unwrap();
+        assert!(matches!(background.command, Command::Background));
+
+        let stop_background =
+            Cli::try_parse_from(["resource-guard", "stop-background", "42"]).unwrap();
+        assert!(matches!(
+            stop_background.command,
+            Command::StopBackground { root_pid: 42 }
+        ));
+    }
+
+    #[test]
+    fn renders_background_workloads_with_growth_and_executable() {
+        let response = BackgroundResponse {
+            workloads: vec![BackgroundWorkloadSummary {
+                group_id: "systemd-unit:app-1.scope".to_owned(),
+                root_pid: 42,
+                root_uid: 1_000,
+                root_started_at: 99,
+                name: "worker".to_owned(),
+                executable: Some(PathBuf::from("/usr/bin/worker")),
+                process_count: 3,
+                process_count_growth: 2,
+                total_memory_bytes: 1_572_864,
+                memory_growth_bytes: 1_048_576,
+                total_cpu_percent: 1.2,
+                age_seconds: 3_661,
+                observed_for_seconds: 1_800,
+            }],
+        };
+
+        let output = render_background(&response);
+
+        assert!(output.contains("worker"));
+        assert!(output.contains("42"));
+        assert!(output.contains("3(+2)"));
+        assert!(output.contains("/usr/bin/worker"));
+        assert!(output.contains("1h01m"));
+    }
+
+    #[test]
+    fn renders_an_empty_background_response() {
+        let response = BackgroundResponse {
+            workloads: Vec::new(),
+        };
+
+        assert_eq!(
+            render_background(&response).trim(),
+            "no growing background applications detected"
+        );
+    }
+
+    #[test]
     fn formats_resource_values_for_top() {
         assert_eq!(format_bytes(1_572_864), "1.5MiB");
         assert_eq!(format_duration(3_661), "1h01m");
@@ -658,5 +862,90 @@ mod tests {
         assert!(output.contains("1.5MiB"));
         assert!(output.contains("1m01s"));
         assert!(output.contains("yes worker"));
+    }
+
+    fn background_policy() -> BackgroundWorkloadPolicy {
+        BackgroundWorkloadPolicy {
+            enabled: true,
+            minimum_age: Duration::from_hours(1),
+            minimum_memory_bytes: 256 * 1_048_576,
+            large_memory_bytes: 512 * 1_048_576,
+            growth_window: Duration::from_secs(60),
+            minimum_memory_growth_bytes: 128 * 1_048_576,
+            minimum_process_count_growth: 2,
+            maximum_cpu_percent: 5.0,
+            consecutive_samples: 3,
+            sample_interval: Duration::from_secs(60),
+            notification_cooldown: Duration::from_secs(60),
+            ignored_root_names: HashSet::new(),
+            ignored_root_executables: HashSet::new(),
+        }
+    }
+
+    fn background_process() -> ObservedProcess {
+        ObservedProcess {
+            descriptor: ProcessDescriptor::new(
+                ProcessIdentity::new(10, 1_000, 10),
+                "app10",
+                Some(PathBuf::from("/usr/bin/app10")),
+            )
+            .with_runtime(None, ProcessState::Sleeping)
+            .with_execution_context(ProcessExecutionContext::new(
+                Some("systemd-unit:app-1.scope".to_owned()),
+                Some("app-1.scope".to_owned()),
+                ProcessOrigin::UserApplication,
+                false,
+            )),
+            resources: ProcessResources {
+                cpu_percent: 1.0,
+                resident_memory_bytes: 600 * 1_048_576,
+                virtual_memory_bytes: 600 * 1_048_576,
+                running_for: Duration::from_hours(2),
+                observed_at: Duration::ZERO,
+            },
+        }
+    }
+
+    fn background_summary(root_uid: u32, root_started_at: u64) -> BackgroundWorkloadSummary {
+        BackgroundWorkloadSummary {
+            group_id: "systemd-unit:app-1.scope".to_owned(),
+            root_pid: 10,
+            root_uid,
+            root_started_at,
+            name: "app10".to_owned(),
+            executable: Some(PathBuf::from("/usr/bin/app10")),
+            process_count: 1,
+            process_count_growth: 0,
+            total_memory_bytes: 600 * 1_048_576,
+            memory_growth_bytes: 0,
+            total_cpu_percent: 1.0,
+            age_seconds: 7_200,
+            observed_for_seconds: 3_600,
+        }
+    }
+
+    #[test]
+    fn stop_background_uses_pid_uid_and_start_time_and_rejects_mismatch() {
+        let processes = vec![background_process()];
+        let protection = ProtectionPolicy::default();
+        let policy = background_policy();
+
+        let matching = background_summary(1_000, 10);
+        assert!(
+            background_workload_for_stop(&processes, &matching, 1_000, &protection, &policy)
+                .is_some()
+        );
+
+        let reused_start = background_summary(1_000, 11);
+        assert!(
+            background_workload_for_stop(&processes, &reused_start, 1_000, &protection, &policy)
+                .is_none()
+        );
+
+        let wrong_owner = background_summary(1_001, 10);
+        assert!(
+            background_workload_for_stop(&processes, &wrong_owner, 1_000, &protection, &policy)
+                .is_none()
+        );
     }
 }
