@@ -24,16 +24,39 @@ pub(crate) enum ControlResponse {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct StaleResponse {
     pub workloads: Vec<StaleWorkloadSummary>,
+    #[serde(default)]
+    pub groups: Vec<StaleWorkloadGroupSummary>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct StaleWorkloadSummary {
     pub root_pid: u32,
+    /// Root UID and Linux start time used to revalidate identity before a stop.
+    /// Optional so a response from an older daemon still renders for viewing,
+    /// while `stop-tree` refuses to signal a workload whose identity cannot be
+    /// verified.
+    #[serde(default)]
+    pub root_uid: Option<u32>,
+    #[serde(default)]
+    pub root_started_at: Option<u64>,
     pub name: String,
     pub process_count: usize,
     pub total_memory_bytes: u64,
     pub total_cpu_percent: f32,
     pub age_seconds: u64,
+}
+
+/// Reporting-only aggregate of independent stale trees sharing an exact working
+/// directory. It intentionally carries no termination or signalling handle.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct StaleWorkloadGroupSummary {
+    pub working_directory: PathBuf,
+    pub tree_count: usize,
+    pub process_count: usize,
+    pub total_memory_bytes: u64,
+    pub total_cpu_percent: f32,
+    pub age_seconds: u64,
+    pub root_pids: Vec<u32>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -99,9 +122,12 @@ pub struct TopProcess {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::{
         BackgroundResponse, BackgroundWorkloadSummary, ControlRequest, ControlResponse,
-        StaleResponse, StaleWorkloadSummary, StatusResponse, TopProcess, TopResponse,
+        StaleResponse, StaleWorkloadGroupSummary, StaleWorkloadSummary, StatusResponse, TopProcess,
+        TopResponse,
     };
 
     #[test]
@@ -172,11 +198,22 @@ mod tests {
             stale: StaleResponse {
                 workloads: vec![StaleWorkloadSummary {
                     root_pid: 42,
+                    root_uid: Some(1_000),
+                    root_started_at: Some(99),
                     name: "pytest".to_owned(),
                     process_count: 3,
                     total_memory_bytes: 4096,
                     total_cpu_percent: 0.2,
                     age_seconds: 3600,
+                }],
+                groups: vec![StaleWorkloadGroupSummary {
+                    working_directory: PathBuf::from("/work/project"),
+                    tree_count: 2,
+                    process_count: 6,
+                    total_memory_bytes: 8192,
+                    total_cpu_percent: 0.4,
+                    age_seconds: 7200,
+                    root_pids: vec![42, 43],
                 }],
             },
         };
@@ -185,6 +222,44 @@ mod tests {
             serde_json::from_slice(&encoded).unwrap(),
             ControlResponse::Stale { .. }
         ));
+    }
+
+    #[test]
+    fn stale_response_accepts_an_old_daemon_without_groups() {
+        let encoded = br#"{"result":"stale","stale":{"workloads":[
+            {"root_pid":42,"name":"pytest","process_count":3,
+             "total_memory_bytes":4096,"total_cpu_percent":0.2,"age_seconds":3600}
+        ]}}"#;
+
+        let response: ControlResponse = serde_json::from_slice(encoded).unwrap();
+
+        let ControlResponse::Stale { stale } = response else {
+            panic!("expected a stale response");
+        };
+        assert_eq!(stale.workloads.len(), 1);
+        assert!(stale.groups.is_empty());
+        assert_eq!(stale.workloads[0].root_uid, None);
+        assert_eq!(stale.workloads[0].root_started_at, None);
+    }
+
+    #[test]
+    fn stale_group_summary_has_no_termination_identifier() {
+        let group = StaleWorkloadGroupSummary {
+            working_directory: PathBuf::from("/work/project"),
+            tree_count: 2,
+            process_count: 6,
+            total_memory_bytes: 8192,
+            total_cpu_percent: 0.4,
+            age_seconds: 7200,
+            root_pids: vec![42, 43],
+        };
+
+        let first = serde_json::to_vec(&group).unwrap();
+        let second = serde_json::to_vec(&group).unwrap();
+        assert_eq!(first, second);
+        let encoded = String::from_utf8(first).unwrap();
+        assert!(!encoded.contains("termination"));
+        assert!(!encoded.contains("signal"));
     }
 
     #[test]

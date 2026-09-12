@@ -91,6 +91,8 @@ impl Settings {
         }
         if self.stale_workloads.minimum_age.is_zero()
             || self.stale_workloads.minimum_tree_memory_bytes == 0
+            || self.stale_workloads.minimum_group_memory_bytes == 0
+            || self.stale_workloads.minimum_group_trees < 2
             || self.stale_workloads.consecutive_samples == 0
             || self.stale_workloads.notification_cooldown.is_zero()
             || !self.stale_workloads.maximum_cpu_percent.is_finite()
@@ -209,7 +211,9 @@ impl Settings {
     pub fn stale_workload_policy(&self) -> StaleWorkloadPolicy {
         StaleWorkloadPolicy {
             enabled: self.stale_workloads.enabled,
-            only_under_memory_pressure: self.stale_workloads.only_under_memory_pressure,
+            notify_only_under_memory_pressure: self
+                .stale_workloads
+                .notify_only_under_memory_pressure,
             candidate_names: self
                 .stale_workloads
                 .candidate_names
@@ -230,6 +234,8 @@ impl Settings {
                 .collect(),
             minimum_age: self.stale_workloads.minimum_age,
             minimum_tree_memory_bytes: self.stale_workloads.minimum_tree_memory_bytes,
+            minimum_group_memory_bytes: self.stale_workloads.minimum_group_memory_bytes,
+            minimum_group_trees: self.stale_workloads.minimum_group_trees,
             maximum_cpu_percent: self.stale_workloads.maximum_cpu_percent,
             consecutive_samples: self.stale_workloads.consecutive_samples,
             notification_cooldown: self.stale_workloads.notification_cooldown,
@@ -381,12 +387,14 @@ impl Default for EmergencySettings {
 #[derive(Clone, Debug, PartialEq)]
 pub struct StaleWorkloadSettings {
     pub enabled: bool,
-    pub only_under_memory_pressure: bool,
+    pub notify_only_under_memory_pressure: bool,
     pub candidate_names: Vec<String>,
     pub launcher_names: Vec<String>,
     pub ignored_root_names: Vec<String>,
     pub minimum_age: Duration,
     pub minimum_tree_memory_bytes: u64,
+    pub minimum_group_memory_bytes: u64,
+    pub minimum_group_trees: usize,
     pub maximum_cpu_percent: f32,
     pub consecutive_samples: u32,
     pub notification_cooldown: Duration,
@@ -396,7 +404,7 @@ impl Default for StaleWorkloadSettings {
     fn default() -> Self {
         Self {
             enabled: true,
-            only_under_memory_pressure: true,
+            notify_only_under_memory_pressure: true,
             candidate_names: vec!["pytest", "coverage", "black", "pre-commit"]
                 .into_iter()
                 .map(str::to_owned)
@@ -408,6 +416,8 @@ impl Default for StaleWorkloadSettings {
             ignored_root_names: Vec::new(),
             minimum_age: Duration::from_hours(1),
             minimum_tree_memory_bytes: 256 * BYTES_PER_MIB,
+            minimum_group_memory_bytes: 512 * BYTES_PER_MIB,
+            minimum_group_trees: 2,
             maximum_cpu_percent: 5.0,
             consecutive_samples: 3,
             notification_cooldown: Duration::from_mins(30),
@@ -779,6 +789,39 @@ mod tests {
                 "bin/worker"
             )))
         );
+    }
+
+    #[test]
+    fn rejects_invalid_stale_workload_group_policy() {
+        let mut settings = Settings::default();
+        settings.stale_workloads.minimum_group_memory_bytes = 0;
+        assert_eq!(
+            settings.validate(),
+            Err(ConfigValidationError::InvalidStaleWorkloadPolicy)
+        );
+
+        settings.stale_workloads = super::StaleWorkloadSettings::default();
+        settings.stale_workloads.minimum_group_trees = 0;
+        assert_eq!(
+            settings.validate(),
+            Err(ConfigValidationError::InvalidStaleWorkloadPolicy)
+        );
+
+        settings.stale_workloads.minimum_group_trees = 1;
+        assert_eq!(
+            settings.validate(),
+            Err(ConfigValidationError::InvalidStaleWorkloadPolicy)
+        );
+    }
+
+    #[test]
+    fn exposes_stale_workload_group_policy_defaults() {
+        let settings = Settings::default();
+        let policy = settings.stale_workload_policy();
+
+        assert!(policy.notify_only_under_memory_pressure);
+        assert_eq!(policy.minimum_group_memory_bytes, 512 * 1_048_576);
+        assert_eq!(policy.minimum_group_trees, 2);
     }
 
     #[test]

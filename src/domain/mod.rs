@@ -24,6 +24,6 @@ pub use process::{
     ProcessDescriptor, ProcessExecutionContext, ProcessIdentity, ProcessOrigin, ProcessState,
 };
 pub use resources::{ProcessResources, ResourceBreach, SystemResources, Thresholds};
-pub use stale_workload::{StaleWorkload, StaleWorkloadPolicy};
+pub use stale_workload::{StaleWorkload, StaleWorkloadGroup, StaleWorkloadPolicy};
 pub use violation::{Evaluation, ViolationPolicy, ViolationTracker};
 pub use workload::WorkloadMember;

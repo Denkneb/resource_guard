@@ -30,4 +30,7 @@ pub use ports::{
 pub use process_control::{
     ForceStopProcess, StopAndWait, StopError, StopOutcome, StopProcess, StopWorkload, WaitForExit,
 };
-pub use stale_workloads::{StaleWorkloadService, detect_workloads, workload_from_root};
+pub use stale_workloads::{
+    StaleWorkloadDetection, StaleWorkloadEvaluation, StaleWorkloadService, detect_workloads,
+    workload_from_root,
+};

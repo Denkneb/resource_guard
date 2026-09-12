@@ -4,7 +4,9 @@ use std::{
     future::Future,
 };
 
-use crate::domain::{BackgroundWorkload, MemoryPressureEvaluation, StaleWorkload};
+use crate::domain::{
+    BackgroundWorkload, MemoryPressureEvaluation, StaleWorkload, StaleWorkloadGroup,
+};
 
 use super::{MonitorEvent, PortError};
 
@@ -196,6 +198,37 @@ impl NotificationRequest {
             body,
             actions: true,
             view,
+        }
+    }
+
+    /// Builds a non-actionable summary for an aggregate stale workload group.
+    ///
+    /// Only the directory basename is shown; the full path stays in the explicit
+    /// local CLI output.
+    #[must_use]
+    pub fn for_stale_workload_group(group: &StaleWorkloadGroup) -> Self {
+        let directory = group.working_directory.file_name().map_or_else(
+            || "unknown".to_owned(),
+            |name| name.to_string_lossy().into_owned(),
+        );
+        let directory = escape_markup(&directory);
+        let body = format!(
+            "Project: {directory}\nTrees: {}\nProcesses: {}\nGroup RAM: {} MiB\nGroup CPU: {:.1}%\nAge: {}\nReason: multiple long-lived low-CPU workload trees from one project",
+            group.tree_count(),
+            group.process_count(),
+            group.total_memory_bytes / 1_048_576,
+            group.total_cpu_percent,
+            format_duration(group.age),
+        );
+        Self {
+            summary: format!(
+                "Stale workload group in {directory}: {} trees, {} processes",
+                group.tree_count(),
+                group.process_count()
+            ),
+            body,
+            actions: false,
+            view: NotificationView::Summary,
         }
     }
 
@@ -669,6 +702,41 @@ mod tests {
         assert!(restored.background_workload().is_some());
         assert!(restored.workload().is_none());
         assert!(restored.event().is_none());
+    }
+
+    #[test]
+    fn stale_group_notification_is_non_actionable_and_hides_the_full_path() {
+        let group = crate::domain::StaleWorkloadGroup {
+            working_directory: PathBuf::from("/home/user/secret-project/alpha"),
+            workloads: vec![workload()],
+            total_memory_bytes: 700 * 1_048_576,
+            total_cpu_percent: 0.3,
+            age: Duration::from_hours(72),
+        };
+
+        let request = NotificationRequest::for_stale_workload_group(&group);
+
+        assert!(!request.has_actions());
+        assert!(request.summary().contains("alpha"));
+        assert!(request.body().contains("Trees: 1"));
+        assert!(request.body().contains("Group RAM: 700 MiB"));
+        assert!(!request.summary().contains("/home/user/secret-project"));
+        assert!(!request.body().contains("/home/user/secret-project"));
+    }
+
+    #[test]
+    fn stale_group_notification_escapes_the_directory_name() {
+        let group = crate::domain::StaleWorkloadGroup {
+            working_directory: PathBuf::from("/tmp/<evil&dir>"),
+            workloads: vec![workload()],
+            total_memory_bytes: 700 * 1_048_576,
+            total_cpu_percent: 0.3,
+            age: Duration::from_hours(72),
+        };
+
+        let request = NotificationRequest::for_stale_workload_group(&group);
+
+        assert!(request.summary().contains("&lt;evil&amp;dir&gt;"));
     }
 
     #[test]

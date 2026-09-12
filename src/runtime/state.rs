@@ -1,15 +1,13 @@
 use std::{path::Path, time::Instant};
 
-use crate::application::MonitorReport;
-use crate::domain::{
-    BackgroundWorkload, MemoryPressureEvaluation, MemoryPressureLevel, StaleWorkload,
-};
+use crate::application::{MonitorReport, StaleWorkloadDetection};
+use crate::domain::{BackgroundWorkload, MemoryPressureEvaluation, MemoryPressureLevel};
 
 use super::{
     StatusResponse,
     protocol::{
-        BackgroundResponse, BackgroundWorkloadSummary, StaleResponse, StaleWorkloadSummary,
-        TopProcess, TopResponse,
+        BackgroundResponse, BackgroundWorkloadSummary, StaleResponse, StaleWorkloadGroupSummary,
+        StaleWorkloadSummary, TopProcess, TopResponse,
     },
 };
 
@@ -36,6 +34,7 @@ pub(crate) struct DaemonState {
     last_error: Option<String>,
     notification_error: Option<String>,
     stale_workloads: Vec<StaleWorkloadSummary>,
+    stale_groups: Vec<StaleWorkloadGroupSummary>,
     background_workloads: Vec<BackgroundWorkloadSummary>,
 }
 
@@ -63,6 +62,7 @@ impl DaemonState {
             last_error: None,
             notification_error: None,
             stale_workloads: Vec::new(),
+            stale_groups: Vec::new(),
             background_workloads: Vec::new(),
         }
     }
@@ -163,16 +163,36 @@ impl DaemonState {
         self.memory_pressure_level
     }
 
-    pub(crate) fn record_stale_workloads(&mut self, workloads: &[StaleWorkload]) {
-        self.stale_workloads = workloads
+    pub(crate) fn record_stale_workloads(&mut self, detection: &StaleWorkloadDetection) {
+        self.stale_workloads = detection
+            .workloads
             .iter()
             .map(|workload| StaleWorkloadSummary {
                 root_pid: workload.identity().pid(),
+                root_uid: Some(workload.identity().uid()),
+                root_started_at: Some(workload.identity().started_at()),
                 name: workload.root.name().to_owned(),
                 process_count: workload.process_count(),
                 total_memory_bytes: workload.total_memory_bytes,
-                total_cpu_percent: workload.total_cpu_percent,
+                total_cpu_percent: normalize_cpu(workload.total_cpu_percent),
                 age_seconds: workload.age.as_secs(),
+            })
+            .collect();
+        self.stale_groups = detection
+            .groups
+            .iter()
+            .map(|group| StaleWorkloadGroupSummary {
+                working_directory: group.working_directory.clone(),
+                tree_count: group.tree_count(),
+                process_count: group.process_count(),
+                total_memory_bytes: group.total_memory_bytes,
+                total_cpu_percent: normalize_cpu(group.total_cpu_percent),
+                age_seconds: group.age.as_secs(),
+                root_pids: group
+                    .root_identities()
+                    .into_iter()
+                    .map(crate::domain::ProcessIdentity::pid)
+                    .collect(),
             })
             .collect();
     }
@@ -180,6 +200,7 @@ impl DaemonState {
     pub(crate) fn stale(&self) -> StaleResponse {
         StaleResponse {
             workloads: self.stale_workloads.clone(),
+            groups: self.stale_groups.clone(),
         }
     }
 

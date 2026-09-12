@@ -16,8 +16,8 @@ The project is Linux-only. It does not require root privileges and is distribute
 - notification actions for `SIGTERM`, one-hour ignore, permanent ignore, and details;
 - local authenticated control socket under `$XDG_RUNTIME_DIR/resource-guard`;
 - `status` and daemon-backed `top` commands;
-- detection of old, low-CPU test/tool workload trees during memory pressure;
-- daemon-backed `stale` inspection and confirmed, leaf-first `stop-tree` termination;
+- detection of old, low-CPU test/tool workload trees, with always-available inventory and exact-working-directory aggregate groups;
+- daemon-backed `stale` inspection of direct trees and aggregate groups, and confirmed, leaf-first `stop-tree` termination of one tree;
 - detection of old, low-CPU background applications that grow or retain memory (RSS or process count);
 - daemon-backed `background` inspection and confirmed `stop-background` termination;
 - PID reuse protection using PID, UID, and Linux process start time;
@@ -49,9 +49,9 @@ The measured release daemon uses 8.00 MiB peak RSS and averages 0.779% of one lo
 Release archives currently target 64-bit glibc-based Linux (`x86_64-unknown-linux-gnu`). Download the archive and its `.sha256` file from the corresponding GitHub release, then verify and extract it:
 
 ```console
-sha256sum --check resource-guard-0.4.0-x86_64-unknown-linux-gnu.tar.gz.sha256
-tar -xzf resource-guard-0.4.0-x86_64-unknown-linux-gnu.tar.gz
-cd resource-guard-0.4.0-x86_64-unknown-linux-gnu
+sha256sum --check resource-guard-0.5.0-x86_64-unknown-linux-gnu.tar.gz.sha256
+tar -xzf resource-guard-0.5.0-x86_64-unknown-linux-gnu.tar.gz
+cd resource-guard-0.5.0-x86_64-unknown-linux-gnu
 ```
 
 Install the extracted binary and user service without `sudo`:
@@ -153,11 +153,15 @@ Userspace polling cannot guarantee recovery from every sudden allocation spike. 
 
 ## Stale workload detection
 
-During warning, critical, or recovery memory pressure, Resource Guard can identify old, low-CPU trees created by configured developer tools such as `pytest`, `coverage`, `black`, and `pre-commit`. A candidate must exceed the configured age and aggregate resident-memory thresholds for several consecutive samples. The detector groups related dedicated launcher processes without crossing into an unrelated parent session. Generic shells, Python interpreters, and `xargs` are excluded from the default launcher list so an action does not absorb an interactive shell or unrelated sibling workloads.
+Resource Guard identifies old, low-CPU trees created by configured developer tools such as `pytest`, `coverage`, `black`, and `pre-commit`. A candidate must exceed the configured age and aggregate resident-memory thresholds for several consecutive samples. The detector groups related dedicated launcher processes without crossing into an unrelated parent session. Generic shells, Python interpreters, and `xargs` are excluded from the default launcher list so an action does not absorb an interactive shell or unrelated sibling workloads.
 
-This feature is notification-only by default and never sends a signal automatically. The notification supports details, one-hour ignore, permanent root-name ignore, and a graceful stop action. Stopping revalidates PID, UID, and start time for every member and sends only `SIGTERM`, leaf-first. There is no `SIGKILL` fallback for workload trees.
+The daemon always builds the stale inventory while detection is enabled, even at normal memory pressure. Memory pressure only gates desktop notifications: `notify_only_under_memory_pressure = true` keeps `resource-guard stale` available as a read-only inventory during normal operation while sending no notifications. Set it to `false` to also notify under normal pressure.
 
-All thresholds, candidate and launcher names, ignored root names, sample count, and notification cooldown are available under `[stale_workloads]` in [`config.example.toml`](config.example.toml).
+Several independent projects can each stay below `minimum_tree_memory_mib` while their small trees together retain gigabytes. To surface that blind spot, eligible trees that share the exact same root working directory are reported as one aggregate group when the group has at least `minimum_group_trees` trees and at least `minimum_group_memory_mib` of combined RAM. Grouping uses the exact absolute `/proc/<root-pid>/cwd` as reported by the Linux adapter: different directories are never merged, and unknown, relative, or deleted working directories are never grouped. This is the only grouping boundary; it does not use systemd scopes or executable names.
+
+Each aggregate group is reporting-only. It never becomes a termination boundary: the CLI prints the group together with its member root PIDs, and `resource-guard stop-tree ROOT_PID` remains the only way to stop a stale workload, stopping exactly one tree after revalidating its PID, UID, and start time. There is no group stop command, no group notification action, and no `SIGKILL` fallback for workload trees.
+
+All thresholds, candidate and launcher names, ignored root names, group size, sample count, and notification cooldown are available under `[stale_workloads]` in [`config.example.toml`](config.example.toml). The former `only_under_memory_pressure` key is accepted as a deprecated alias for `notify_only_under_memory_pressure`; the daemon always writes the new name.
 
 ## Background application detection
 
@@ -195,13 +199,15 @@ resource-guard top
 resource-guard top --watch
 ```
 
-Show workload trees currently classified as stale:
+Show stale workload trees and aggregate groups currently reported by the daemon:
 
 ```console
 resource-guard stale
 ```
 
-Gracefully stop a reported tree after typing its exact root PID:
+`stale` is available at normal pressure. It prints aggregate groups (with the exact project directory and each member root PID) and any direct stale trees outside those groups. Individual roots are never listed twice.
+
+Gracefully stop one reported tree (direct or group member) after typing its exact root PID:
 
 ```console
 resource-guard stop-tree ROOT_PID

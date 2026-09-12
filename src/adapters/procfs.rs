@@ -1,4 +1,4 @@
-use std::{fs, io};
+use std::{fs, io, os::unix::ffi::OsStrExt as _, path::PathBuf};
 
 use crate::domain::{ProcessExecutionContext, ProcessOrigin};
 
@@ -6,6 +6,23 @@ pub(super) fn read_process_identity(pid: u32) -> io::Result<(u32, u64)> {
     let (started_at, _tty_nr) = read_process_start_time(pid)?;
     let uid = read_process_uid(pid)?;
     Ok((uid, started_at))
+}
+
+/// Reads the validated absolute working directory of a process.
+///
+/// Returns `None` for a relative, empty, or deleted target. The caller keeps the
+/// process in the snapshot either way; only group aggregation is skipped.
+pub(super) fn read_working_directory(pid: u32) -> Option<PathBuf> {
+    let path = fs::read_link(format!("/proc/{pid}/cwd")).ok()?;
+    validated_working_directory(path)
+}
+
+fn validated_working_directory(path: PathBuf) -> Option<PathBuf> {
+    let bytes = path.as_os_str().as_bytes();
+    if bytes.is_empty() || !path.is_absolute() || bytes.ends_with(b" (deleted)") {
+        return None;
+    }
+    Some(path)
 }
 
 /// Reads the stable identity and neutral execution context of a process.
@@ -172,7 +189,7 @@ mod tests {
 
     use super::{
         classify_cgroup, execution_context_from, parse_real_uid, parse_start_time, parse_tty_nr,
-        read_execution_context, read_process_identity_and_context,
+        read_execution_context, read_process_identity_and_context, validated_working_directory,
     };
 
     #[test]
@@ -348,5 +365,23 @@ mod tests {
 
         assert_eq!(context.origin(), ProcessOrigin::Unknown);
         assert_eq!(context.group_id(), None);
+    }
+
+    #[test]
+    fn accepts_an_absolute_working_directory() {
+        let path = std::path::PathBuf::from("/work/project");
+
+        assert_eq!(validated_working_directory(path.clone()), Some(path));
+    }
+
+    #[test]
+    fn rejects_relative_empty_and_deleted_working_directories() {
+        for path in [
+            std::path::PathBuf::from("relative/project"),
+            std::path::PathBuf::new(),
+            std::path::PathBuf::from("/work/project (deleted)"),
+        ] {
+            assert_eq!(validated_working_directory(path), None);
+        }
     }
 }

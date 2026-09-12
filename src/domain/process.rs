@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Neutral description of where a process came from.
 ///
@@ -102,6 +102,7 @@ pub struct ProcessDescriptor {
     parent_pid: Option<u32>,
     state: ProcessState,
     execution_context: ProcessExecutionContext,
+    working_directory: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -128,6 +129,7 @@ impl ProcessDescriptor {
             parent_pid: None,
             state: ProcessState::Other,
             execution_context: ProcessExecutionContext::default(),
+            working_directory: None,
         }
     }
 
@@ -141,6 +143,16 @@ impl ProcessDescriptor {
     #[must_use]
     pub fn with_execution_context(mut self, context: ProcessExecutionContext) -> Self {
         self.execution_context = context;
+        self
+    }
+
+    /// Sets an already validated absolute working directory.
+    ///
+    /// The Linux adapter reads `/proc/<pid>/cwd` and never exposes the raw
+    /// system call to domain or application code.
+    #[must_use]
+    pub fn with_working_directory(mut self, working_directory: Option<PathBuf>) -> Self {
+        self.working_directory = working_directory;
         self
     }
 
@@ -173,11 +185,18 @@ impl ProcessDescriptor {
     pub const fn execution_context(&self) -> &ProcessExecutionContext {
         &self.execution_context
     }
+
+    #[must_use]
+    pub fn working_directory(&self) -> Option<&Path> {
+        self.working_directory.as_deref()
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::ProcessIdentity;
+    use std::path::PathBuf;
+
+    use super::{ProcessDescriptor, ProcessIdentity};
 
     #[test]
     fn reused_pid_has_a_different_identity() {
@@ -185,5 +204,18 @@ mod tests {
         let reused = ProcessIdentity::new(42, 1_000, 101);
 
         assert_ne!(original, reused);
+    }
+
+    #[test]
+    fn working_directory_defaults_to_none_and_is_settable() {
+        let identity = ProcessIdentity::new(42, 1_000, 100);
+        let without = ProcessDescriptor::new(identity, "worker", None);
+        assert_eq!(without.working_directory(), None);
+
+        let with = without.with_working_directory(Some(PathBuf::from("/work/project")));
+        assert_eq!(
+            with.working_directory(),
+            Some(std::path::Path::new("/work/project"))
+        );
     }
 }

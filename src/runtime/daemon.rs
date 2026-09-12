@@ -549,12 +549,12 @@ async fn record_monitor_report(
         .iter()
         .map(|process| process.observed.clone())
         .collect::<Vec<_>>();
-    let (stale_candidates, notifications) = stale_service.evaluate(&observed, pressure, now);
+    let evaluation = stale_service.evaluate(&observed, pressure, now);
     state
         .write()
         .await
-        .record_stale_workloads(&stale_candidates);
-    for workload in notifications {
+        .record_stale_workloads(&evaluation.detection);
+    for workload in evaluation.direct_notifications {
         warn!(
             pid = workload.identity().pid(),
             process = workload.root.name(),
@@ -577,6 +577,38 @@ async fn record_monitor_report(
                 ),
                 Err(error) => {
                     warn!(%error, "stale workload notification failed");
+                    state
+                        .write()
+                        .await
+                        .record_notification_error(error.to_string());
+                    bindings.clear();
+                    *notifier = None;
+                    break;
+                }
+            }
+        }
+    }
+    for group in evaluation.group_notifications {
+        warn!(
+            working_directory = %group
+                .working_directory
+                .file_name()
+                .map_or_else(String::new, |name| name.to_string_lossy().into_owned()),
+            tree_count = group.tree_count(),
+            process_count = group.process_count(),
+            memory_bytes = group.total_memory_bytes,
+            cpu_percent = group.total_cpu_percent,
+            age_seconds = group.age.as_secs(),
+            "aggregate stale workload group detected"
+        );
+        if let Some(sink) = notifier.as_mut() {
+            match sink
+                .notify(NotificationRequest::for_stale_workload_group(&group), None)
+                .await
+            {
+                Ok(_) => state.write().await.clear_notification_error(),
+                Err(error) => {
+                    warn!(%error, "stale workload group notification failed");
                     state
                         .write()
                         .await

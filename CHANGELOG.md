@@ -7,6 +7,23 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-09-13
+
+### Added
+
+- Added always-available stale workload inventory and exact-working-directory aggregate groups, so many small independent trees from one project are reported together with their member root PIDs.
+- Added a non-actionable aggregate group desktop notification under memory pressure; group members do not notify individually.
+
+### Changed
+
+- Renamed the stale setting `only_under_memory_pressure` to `notify_only_under_memory_pressure`. The old key is still accepted as a deprecated alias and the new name is written on save.
+- `resource-guard stale` now reports direct trees and aggregate groups at normal memory pressure; pressure only gates notifications.
+- Added `minimum_group_memory_mib` and `minimum_group_trees` stale thresholds.
+
+### Security
+
+- Aggregate groups are reporting-only and expose no stop action or group termination command; `stop-tree` still stops exactly one revalidated tree.
+
 ## [0.4.0] - 2026-09-12
 
 ### Added
@@ -76,7 +93,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - Unit, adapter, CLI, process-signalling, packaging, and resource-baseline tests.
 - CI, dependency policy checks, Dependabot, and local pre-commit/pre-push hooks.
 
-[Unreleased]: https://github.com/Denkneb/resource_guard/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/Denkneb/resource_guard/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/Denkneb/resource_guard/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/Denkneb/resource_guard/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/Denkneb/resource_guard/compare/v0.2.2...v0.3.0
 [0.2.2]: https://github.com/Denkneb/resource_guard/compare/v0.2.1...v0.2.2

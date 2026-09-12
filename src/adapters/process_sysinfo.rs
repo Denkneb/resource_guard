@@ -19,7 +19,7 @@ use crate::{
 
 use super::procfs::{
     read_execution_context, read_process_identity_and_context, read_process_start_time,
-    read_process_uid,
+    read_process_uid, read_working_directory,
 };
 
 /// Per-process facts that are immutable for the lifetime of a PID and can be
@@ -84,6 +84,9 @@ impl SysinfoProcessSource {
         let observed_at = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap_or_default();
+        let working_directory = (uid == current_uid)
+            .then(|| read_working_directory(pid))
+            .flatten();
 
         Some(ObservedProcess {
             descriptor: ProcessDescriptor::new(
@@ -95,7 +98,8 @@ impl SysinfoProcessSource {
                 process.parent().map(Pid::as_u32),
                 process_state(process.status()),
             )
-            .with_execution_context(execution_context),
+            .with_execution_context(execution_context)
+            .with_working_directory(working_directory),
             resources: ProcessResources {
                 cpu_percent: process.cpu_usage(),
                 resident_memory_bytes: process.memory(),

@@ -264,12 +264,15 @@ struct ConfigDocument {
 #[serde(default, deny_unknown_fields)]
 struct StaleWorkloadDocument {
     enabled: bool,
-    only_under_memory_pressure: bool,
+    #[serde(alias = "only_under_memory_pressure")]
+    notify_only_under_memory_pressure: bool,
     candidate_names: Vec<String>,
     launcher_names: Vec<String>,
     ignored_root_names: Vec<String>,
     minimum_age_minutes: u64,
     minimum_tree_memory_mib: u64,
+    minimum_group_memory_mib: u64,
+    minimum_group_trees: usize,
     maximum_cpu_percent: f32,
     consecutive_samples: u32,
     notification_cooldown_minutes: u64,
@@ -464,7 +467,9 @@ impl From<ConfigDocument> for Settings {
             },
             stale_workloads: crate::application::StaleWorkloadSettings {
                 enabled: document.stale_workloads.enabled,
-                only_under_memory_pressure: document.stale_workloads.only_under_memory_pressure,
+                notify_only_under_memory_pressure: document
+                    .stale_workloads
+                    .notify_only_under_memory_pressure,
                 candidate_names: document.stale_workloads.candidate_names,
                 launcher_names: document.stale_workloads.launcher_names,
                 ignored_root_names: document.stale_workloads.ignored_root_names,
@@ -478,6 +483,11 @@ impl From<ConfigDocument> for Settings {
                     .stale_workloads
                     .minimum_tree_memory_mib
                     .saturating_mul(BYTES_PER_MIB),
+                minimum_group_memory_bytes: document
+                    .stale_workloads
+                    .minimum_group_memory_mib
+                    .saturating_mul(BYTES_PER_MIB),
+                minimum_group_trees: document.stale_workloads.minimum_group_trees,
                 maximum_cpu_percent: document.stale_workloads.maximum_cpu_percent,
                 consecutive_samples: document.stale_workloads.consecutive_samples,
                 notification_cooldown: Duration::from_secs(
@@ -566,12 +576,14 @@ impl From<&crate::application::StaleWorkloadSettings> for StaleWorkloadDocument 
     fn from(settings: &crate::application::StaleWorkloadSettings) -> Self {
         Self {
             enabled: settings.enabled,
-            only_under_memory_pressure: settings.only_under_memory_pressure,
+            notify_only_under_memory_pressure: settings.notify_only_under_memory_pressure,
             candidate_names: settings.candidate_names.clone(),
             launcher_names: settings.launcher_names.clone(),
             ignored_root_names: settings.ignored_root_names.clone(),
             minimum_age_minutes: settings.minimum_age.as_secs() / 60,
             minimum_tree_memory_mib: settings.minimum_tree_memory_bytes / BYTES_PER_MIB,
+            minimum_group_memory_mib: settings.minimum_group_memory_bytes / BYTES_PER_MIB,
+            minimum_group_trees: settings.minimum_group_trees,
             maximum_cpu_percent: settings.maximum_cpu_percent,
             consecutive_samples: settings.consecutive_samples,
             notification_cooldown_minutes: settings.notification_cooldown.as_secs() / 60,
@@ -910,5 +922,108 @@ mod tests {
         assert!(contents.contains("[background_workloads]"));
         assert!(contents.contains("large_memory_mib = 1024"));
         assert!(contents.contains("ignored_root_names = [\"worker\"]"));
+    }
+
+    #[test]
+    fn stale_legacy_key_is_accepted_and_migrated_on_save() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        fs::write(
+            &path,
+            "[stale_workloads]\nonly_under_memory_pressure = false\n",
+        )
+        .unwrap();
+        let repository = TomlConfigRepository::new(&path);
+
+        let settings = repository.load().unwrap().settings;
+        assert!(!settings.stale_workloads.notify_only_under_memory_pressure);
+
+        repository.save(&settings).unwrap();
+        let contents = fs::read_to_string(&path).unwrap();
+        assert!(contents.contains("notify_only_under_memory_pressure = false"));
+        assert!(!contents.contains("\nonly_under_memory_pressure"));
+    }
+
+    #[test]
+    fn stale_new_key_is_accepted() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        fs::write(
+            &path,
+            "[stale_workloads]\nnotify_only_under_memory_pressure = false\n",
+        )
+        .unwrap();
+        let repository = TomlConfigRepository::new(&path);
+
+        let settings = repository.load().unwrap().settings;
+
+        assert!(!settings.stale_workloads.notify_only_under_memory_pressure);
+    }
+
+    #[test]
+    fn stale_duplicate_legacy_and_new_keys_are_rejected() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        fs::write(
+            &path,
+            "[stale_workloads]\nonly_under_memory_pressure = true\nnotify_only_under_memory_pressure = true\n",
+        )
+        .unwrap();
+        let repository = TomlConfigRepository::new(&path);
+
+        assert!(matches!(repository.load(), Err(ConfigError::Parse { .. })));
+    }
+
+    #[test]
+    fn stale_group_section_round_trips_through_save_and_load() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        let repository = TomlConfigRepository::new(&path);
+        let mut settings = crate::application::Settings::default();
+        settings.stale_workloads.minimum_group_memory_bytes = 1_024 * 1_048_576;
+        settings.stale_workloads.minimum_group_trees = 4;
+
+        repository.save(&settings).unwrap();
+
+        assert_eq!(repository.load().unwrap().settings, settings);
+        let contents = fs::read_to_string(path).unwrap();
+        assert!(contents.contains("minimum_group_memory_mib = 1024"));
+        assert!(contents.contains("minimum_group_trees = 4"));
+    }
+
+    #[test]
+    fn stale_defaults_expose_new_keys() {
+        let directory = tempdir().unwrap();
+        let repository = TomlConfigRepository::new(directory.path().join("config.toml"));
+
+        let settings = repository.load().unwrap().settings;
+
+        assert!(settings.stale_workloads.notify_only_under_memory_pressure);
+        assert_eq!(
+            settings.stale_workloads.minimum_group_memory_bytes,
+            512 * 1_048_576
+        );
+        assert_eq!(settings.stale_workloads.minimum_group_trees, 2);
+
+        let rendered = TomlConfigRepository::render(&settings).unwrap();
+        assert!(rendered.contains("notify_only_under_memory_pressure = true"));
+        assert!(rendered.contains("minimum_group_memory_mib = 512"));
+        assert!(rendered.contains("minimum_group_trees = 2"));
+    }
+
+    #[test]
+    fn stale_rejects_zero_group_values() {
+        for contents in [
+            "[stale_workloads]\nminimum_group_memory_mib = 0\n",
+            "[stale_workloads]\nminimum_group_trees = 0\n",
+            "[stale_workloads]\nminimum_group_trees = 1\n",
+        ] {
+            let directory = tempdir().unwrap();
+            let path = directory.path().join("config.toml");
+            fs::write(&path, contents).unwrap();
+            let repository = TomlConfigRepository::new(path);
+
+            assert!(matches!(repository.load(), Err(ConfigError::Validation(_))));
+        }
     }
 }
