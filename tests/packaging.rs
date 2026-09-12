@@ -29,9 +29,24 @@ fn user_service_does_not_request_root_and_keeps_required_access() {
     assert!(!UNIT.contains("ProtectHome="));
     assert!(UNIT.contains("NoNewPrivileges=yes"));
     assert!(UNIT.contains("RestrictAddressFamilies=AF_UNIX"));
+    assert!(UNIT.contains("RestrictNamespaces=yes"));
+    assert!(UNIT.contains("RestrictRealtime=yes"));
+    assert!(UNIT.contains("RestrictSUIDSGID=yes"));
+    assert!(UNIT.contains("LockPersonality=yes"));
+    assert!(UNIT.contains("MemoryDenyWriteExecute=yes"));
+    assert!(UNIT.contains("RuntimeDirectory=resource-guard"));
+    assert!(UNIT.contains("RuntimeDirectoryMode=0700"));
+    assert!(UNIT.contains("UMask=0077"));
     assert!(!UNIT.contains("CapabilityBoundingSet="));
     assert!(!UNIT.contains("AmbientCapabilities="));
-    for incompatible_directive in ["PrivateDevices=", "ProtectClock=", "ProtectKernelModules="] {
+    for incompatible_directive in [
+        "PrivateDevices=",
+        "ProtectClock=",
+        "ProtectKernelModules=",
+        "PrivateTmp=",
+        "ProtectKernelTunables=",
+        "ProtectControlGroups=",
+    ] {
         assert!(!UNIT.contains(incompatible_directive));
     }
 }

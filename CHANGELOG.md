@@ -7,6 +7,14 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-09-13
+
+### Fixed
+
+- Restored same-user `/proc/<pid>/cwd` access for the packaged user service on
+  Ubuntu/AppArmor systems, so exact-working-directory stale workload groups are
+  visible when Resource Guard runs under systemd.
+
 ## [0.5.0] - 2026-09-13
 
 ### Added
@@ -93,7 +101,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - Unit, adapter, CLI, process-signalling, packaging, and resource-baseline tests.
 - CI, dependency policy checks, Dependabot, and local pre-commit/pre-push hooks.
 
-[Unreleased]: https://github.com/Denkneb/resource_guard/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/Denkneb/resource_guard/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/Denkneb/resource_guard/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/Denkneb/resource_guard/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/Denkneb/resource_guard/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/Denkneb/resource_guard/compare/v0.2.2...v0.3.0

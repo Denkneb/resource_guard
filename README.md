@@ -49,9 +49,9 @@ The measured release daemon uses 8.00 MiB peak RSS and averages 0.779% of one lo
 Release archives currently target 64-bit glibc-based Linux (`x86_64-unknown-linux-gnu`). Download the archive and its `.sha256` file from the corresponding GitHub release, then verify and extract it:
 
 ```console
-sha256sum --check resource-guard-0.5.0-x86_64-unknown-linux-gnu.tar.gz.sha256
-tar -xzf resource-guard-0.5.0-x86_64-unknown-linux-gnu.tar.gz
-cd resource-guard-0.5.0-x86_64-unknown-linux-gnu
+sha256sum --check resource-guard-0.5.1-x86_64-unknown-linux-gnu.tar.gz.sha256
+tar -xzf resource-guard-0.5.1-x86_64-unknown-linux-gnu.tar.gz
+cd resource-guard-0.5.1-x86_64-unknown-linux-gnu
 ```
 
 Install the extracted binary and user service without `sudo`:
@@ -81,6 +81,8 @@ systemctl --user enable --now resource-guard.service
 ```
 
 The packaged unit expects the binary at `~/.local/bin/resource-guard`. It creates the private runtime directory used by the control socket and restarts the daemon after unexpected failures. The desktop entry gives notifications a stable application identity so compatible desktop environments can group them and retain them in notification history.
+
+Exact-working-directory stale grouping needs the service to read the same-user `/proc/<pid>/cwd`. On Ubuntu/AppArmor systems, namespace-producing sandboxing moves the service into a restricted AppArmor context that blocks that read even for processes of the same user, so the packaged unit intentionally omits `PrivateTmp=`, `ProtectKernelTunables=`, and `ProtectControlGroups=`. The remaining hardening restrictions are preserved: `NoNewPrivileges`, `RestrictNamespaces`, `RestrictRealtime`, `RestrictSUIDSGID`, `LockPersonality`, `MemoryDenyWriteExecute`, `RestrictAddressFamilies`, the restrictive `UMask`, and the private runtime directory. Aggregate groups remain reporting-only, and `stop-tree` still stops exactly one revalidated tree.
 
 Inspect the service and its logs with:
 
