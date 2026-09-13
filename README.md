@@ -17,7 +17,7 @@ The project is Linux-only. It does not require root privileges and is distribute
 - local authenticated control socket under `$XDG_RUNTIME_DIR/resource-guard`;
 - `status` and daemon-backed `top` commands;
 - detection of old, low-CPU test/tool workload trees, with always-available inventory and exact-working-directory aggregate groups;
-- daemon-backed `stale` inspection of direct trees and aggregate groups, and confirmed, leaf-first `stop-tree` termination of one tree;
+- daemon-backed `stale` inspection of direct trees and aggregate groups, confirmed leaf-first `stop-tree` termination of one tree, and a two-step notification action that stops every tree of one aggregate group;
 - detection of old, low-CPU background applications that grow or retain memory (RSS or process count);
 - daemon-backed `background` inspection and confirmed `stop-background` termination;
 - PID reuse protection using PID, UID, and Linux process start time;
@@ -82,7 +82,7 @@ systemctl --user enable --now resource-guard.service
 
 The packaged unit expects the binary at `~/.local/bin/resource-guard`. It creates the private runtime directory used by the control socket and restarts the daemon after unexpected failures. The desktop entry gives notifications a stable application identity so compatible desktop environments can group them and retain them in notification history.
 
-Exact-working-directory stale grouping needs the service to read the same-user `/proc/<pid>/cwd`. On Ubuntu/AppArmor systems, namespace-producing sandboxing moves the service into a restricted AppArmor context that blocks that read even for processes of the same user, so the packaged unit intentionally omits `PrivateTmp=`, `ProtectKernelTunables=`, and `ProtectControlGroups=`. The remaining hardening restrictions are preserved: `NoNewPrivileges`, `RestrictNamespaces`, `RestrictRealtime`, `RestrictSUIDSGID`, `LockPersonality`, `MemoryDenyWriteExecute`, `RestrictAddressFamilies`, the restrictive `UMask`, and the private runtime directory. Aggregate groups remain reporting-only, and `stop-tree` still stops exactly one revalidated tree.
+Exact-working-directory stale grouping needs the service to read the same-user `/proc/<pid>/cwd`. On Ubuntu/AppArmor systems, namespace-producing sandboxing moves the service into a restricted AppArmor context that blocks that read even for processes of the same user, so the packaged unit intentionally omits `PrivateTmp=`, `ProtectKernelTunables=`, and `ProtectControlGroups=`. The remaining hardening restrictions are preserved: `NoNewPrivileges`, `RestrictNamespaces`, `RestrictRealtime`, `RestrictSUIDSGID`, `LockPersonality`, `MemoryDenyWriteExecute`, `RestrictAddressFamilies`, the restrictive `UMask`, and the private runtime directory. Aggregate groups can be stopped only through the explicit two-step notification action over an immutable identity snapshot, and `stop-tree` still stops exactly one revalidated tree.
 
 Inspect the service and its logs with:
 
@@ -157,11 +157,13 @@ Userspace polling cannot guarantee recovery from every sudden allocation spike. 
 
 Resource Guard identifies old, low-CPU trees created by configured developer tools such as `pytest`, `coverage`, `black`, and `pre-commit`. A candidate must exceed the configured age and aggregate resident-memory thresholds for several consecutive samples. The detector groups related dedicated launcher processes without crossing into an unrelated parent session. Generic shells, Python interpreters, and `xargs` are excluded from the default launcher list so an action does not absorb an interactive shell or unrelated sibling workloads.
 
-The daemon always builds the stale inventory while detection is enabled, even at normal memory pressure. Memory pressure only gates desktop notifications: `notify_only_under_memory_pressure = true` keeps `resource-guard stale` available as a read-only inventory during normal operation while sending no notifications. Set it to `false` to also notify under normal pressure.
+The daemon always builds the stale inventory while detection is enabled, even at normal memory pressure. Memory pressure only gates desktop notifications: `notify_only_under_memory_pressure = true` keeps `resource-guard stale` available as a read-only inventory during normal operation while suppressing every stale desktop notification, including the actionable group offer. The inventory is never suppressed. Set it to `false` if you want the stale group offer to arrive under normal pressure as well.
 
 Several independent projects can each stay below `minimum_tree_memory_mib` while their small trees together retain gigabytes. To surface that blind spot, eligible trees that share the exact same root working directory are reported as one aggregate group when the group has at least `minimum_group_trees` trees and at least `minimum_group_memory_mib` of combined RAM. Grouping uses the exact absolute `/proc/<root-pid>/cwd` as reported by the Linux adapter: different directories are never merged, and unknown, relative, or deleted working directories are never grouped. This is the only grouping boundary; it does not use systemd scopes or executable names.
 
-Each aggregate group is reporting-only. It never becomes a termination boundary: the CLI prints the group together with its member root PIDs, and `resource-guard stop-tree ROOT_PID` remains the only way to stop a stale workload, stopping exactly one tree after revalidating its PID, UID, and start time. There is no group stop command, no group notification action, and no `SIGKILL` fallback for workload trees.
+Each aggregate group is offered through a two-step desktop notification instead of a single destructive button. The summary shows the project basename, tree and process counts, aggregate RAM/CPU, age, and a single `Подробнее` button. The details view repeats the scale and states that the action sends only `SIGTERM` to every listed independent workload tree, that parent terminal/session processes are not selected automatically, and the first 20 root PIDs (with `and N more` when the group is larger; the full list is available from `resource-guard stale`). The details view offers `Завершить все деревья` and `Назад`.
+
+The group action is bound to the immutable `StaleWorkloadGroup` snapshot captured when the notification was created, never to the working directory. The whole termination list is preflighted for PID, UID, Linux start time, and protection policy before the first signal, and each identity is revalidated again immediately before its own signal. There is no group `SIGKILL`, no automatic group stop, and no CLI group stop command: `resource-guard stop-tree ROOT_PID` remains the only CLI way to stop a stale workload, stopping exactly one tree after revalidating its PID, UID, and start time.
 
 All thresholds, candidate and launcher names, ignored root names, group size, sample count, and notification cooldown are available under `[stale_workloads]` in [`config.example.toml`](config.example.toml). The former `only_under_memory_pressure` key is accepted as a deprecated alias for `notify_only_under_memory_pressure`; the daemon always writes the new name.
 
@@ -207,7 +209,7 @@ Show stale workload trees and aggregate groups currently reported by the daemon:
 resource-guard stale
 ```
 
-`stale` is available at normal pressure. It prints aggregate groups (with the exact project directory and each member root PID) and any direct stale trees outside those groups. Individual roots are never listed twice.
+`stale` is available at normal pressure. It prints aggregate groups (with the exact project directory and each member root PID) and any direct stale trees outside those groups. Individual roots are never listed twice. Aggregate group desktop notifications are two-step (summary, then details) and always use the immutable identity snapshot described above, so `stale` remains the source of truth for the full list.
 
 Gracefully stop one reported tree (direct or group member) after typing its exact root PID:
 

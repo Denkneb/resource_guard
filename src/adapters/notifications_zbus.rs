@@ -8,15 +8,16 @@ use zbus::{
 };
 
 use crate::application::{
-    NotificationAction, NotificationCloseReason, NotificationEvent, NotificationRequest,
-    NotificationSink, NotificationView, PortError,
+    NotificationAction, NotificationActionSet, NotificationCloseReason, NotificationEvent,
+    NotificationRequest, NotificationSink, PortError,
 };
 
 const SERVICE: &str = "org.freedesktop.Notifications";
 const PATH: &str = "/org/freedesktop/Notifications";
 const INTERFACE: &str = "org.freedesktop.Notifications";
 const DESKTOP_ENTRY: &str = "io.github.denkneb.ResourceGuard";
-const SUMMARY_ACTIONS: &[&str] = &[
+const NO_ACTIONS: &[&str] = &[];
+const STANDARD_SUMMARY_ACTIONS: &[&str] = &[
     "stop",
     "Остановить",
     "ignore_hour",
@@ -26,7 +27,9 @@ const SUMMARY_ACTIONS: &[&str] = &[
     "details",
     "Подробнее",
 ];
-const DETAILS_ACTIONS: &[&str] = &["back", "Назад"];
+const DETAILS_ONLY_ACTIONS: &[&str] = &["details", "Подробнее"];
+const BACK_ONLY_ACTIONS: &[&str] = &["back", "Назад"];
+const GROUP_DETAILS_ACTIONS: &[&str] = &["stop_group", "Завершить все деревья", "back", "Назад"];
 
 #[derive(Debug)]
 struct NotificationServer {
@@ -146,8 +149,7 @@ impl NotificationSink for ZbusNotificationSink {
         let timeout = self.timeout_milliseconds;
         async move {
             let proxy = notification_proxy(&connection).await?;
-            let actions =
-                notification_actions(request.view, supports_actions && request.has_actions());
+            let actions = notification_actions(request.action_set(), supports_actions);
             let hints = notification_hints(supports_persistence);
             proxy
                 .call(
@@ -187,13 +189,19 @@ fn has_capability(capabilities: &[String], expected: &str) -> bool {
     capabilities.iter().any(|capability| capability == expected)
 }
 
-fn notification_actions(view: NotificationView, supports_actions: bool) -> &'static [&'static str] {
+fn notification_actions(
+    action_set: NotificationActionSet,
+    supports_actions: bool,
+) -> &'static [&'static str] {
     if !supports_actions {
-        return &[];
+        return NO_ACTIONS;
     }
-    match view {
-        NotificationView::Summary => SUMMARY_ACTIONS,
-        NotificationView::Details => DETAILS_ACTIONS,
+    match action_set {
+        NotificationActionSet::None => NO_ACTIONS,
+        NotificationActionSet::StandardSummary => STANDARD_SUMMARY_ACTIONS,
+        NotificationActionSet::DetailsOnly => DETAILS_ONLY_ACTIONS,
+        NotificationActionSet::BackOnly => BACK_ONLY_ACTIONS,
+        NotificationActionSet::GroupDetails => GROUP_DETAILS_ACTIONS,
     }
 }
 

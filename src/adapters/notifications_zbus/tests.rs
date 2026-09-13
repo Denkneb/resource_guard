@@ -19,10 +19,14 @@ use super::{
 };
 use crate::{
     application::{
-        MonitorEvent, NotificationAction, NotificationBinding, NotificationCloseReason,
-        NotificationEvent, NotificationSink, NotificationView,
+        MonitorEvent, NotificationAction, NotificationActionSet, NotificationBinding,
+        NotificationCloseReason, NotificationEvent, NotificationRequest, NotificationSink,
+        NotificationView,
     },
-    domain::{ProcessDescriptor, ProcessIdentity, ProcessResources, ResourceBreach},
+    domain::{
+        ProcessDescriptor, ProcessIdentity, ProcessResources, ResourceBreach, StaleWorkload,
+        StaleWorkloadGroup, WorkloadMember,
+    },
 };
 
 #[derive(Debug)]
@@ -50,13 +54,18 @@ struct FakeState {
 #[derive(Clone, Debug)]
 struct FakeNotifications {
     state: Arc<FakeState>,
+    supports_actions: bool,
 }
 
 #[zbus::interface(name = "org.freedesktop.Notifications")]
 impl FakeNotifications {
     #[allow(clippy::unused_self)]
     fn get_capabilities(&self) -> Vec<String> {
-        vec!["actions".to_owned(), "persistence".to_owned()]
+        let mut capabilities = vec!["persistence".to_owned()];
+        if self.supports_actions {
+            capabilities.push("actions".to_owned());
+        }
+        capabilities
     }
 
     #[allow(clippy::unused_self)]
@@ -183,6 +192,31 @@ fn monitor_event() -> MonitorEvent {
     }
 }
 
+fn stale_workload() -> StaleWorkload {
+    let event = monitor_event();
+    StaleWorkload {
+        root: event.process.clone(),
+        members: vec![WorkloadMember {
+            process: event.process,
+            resources: event.resources,
+            depth: 0,
+        }],
+        total_memory_bytes: 700 * 1_048_576,
+        total_cpu_percent: 0.3,
+        age: Duration::from_hours(72),
+    }
+}
+
+fn stale_group() -> StaleWorkloadGroup {
+    StaleWorkloadGroup {
+        working_directory: PathBuf::from("/home/user/work/alpha"),
+        workloads: vec![stale_workload()],
+        total_memory_bytes: 700 * 1_048_576,
+        total_cpu_percent: 0.3,
+        age: Duration::from_hours(72),
+    }
+}
+
 async fn emitted_action(
     server: &zbus::Connection,
     events: &mut mpsc::Receiver<Result<NotificationEvent, crate::application::PortError>>,
@@ -215,14 +249,28 @@ fn notification_timeout_is_safely_bounded() {
 }
 
 #[test]
-fn summary_and_details_expose_the_expected_actions() {
-    let summary = notification_actions(NotificationView::Summary, true);
-    let details = notification_actions(NotificationView::Details, true);
+fn action_sets_select_the_expected_buttons() {
+    let standard = notification_actions(NotificationActionSet::StandardSummary, true);
+    assert!(standard.contains(&"details"));
+    assert!(standard.contains(&"stop"));
+    assert!(standard.contains(&"ignore_hour"));
+    assert!(standard.contains(&"always_ignore"));
 
-    assert!(summary.contains(&"details"));
-    assert!(summary.contains(&"stop"));
-    assert_eq!(details, ["back", "Назад"]);
-    assert!(notification_actions(NotificationView::Summary, false).is_empty());
+    assert_eq!(
+        notification_actions(NotificationActionSet::DetailsOnly, true),
+        ["details", "Подробнее"]
+    );
+    assert_eq!(
+        notification_actions(NotificationActionSet::BackOnly, true),
+        ["back", "Назад"]
+    );
+    assert_eq!(
+        notification_actions(NotificationActionSet::GroupDetails, true),
+        ["stop_group", "Завершить все деревья", "back", "Назад"]
+    );
+    assert!(notification_actions(NotificationActionSet::None, true).is_empty());
+    assert!(notification_actions(NotificationActionSet::StandardSummary, false).is_empty());
+    assert!(notification_actions(NotificationActionSet::GroupDetails, false).is_empty());
 }
 
 #[test]
@@ -252,6 +300,7 @@ async fn adapter_navigates_and_reports_closure_over_a_private_dbus() {
             PATH,
             FakeNotifications {
                 state: Arc::clone(&state),
+                supports_actions: true,
             },
         )
         .unwrap()
@@ -325,4 +374,113 @@ async fn adapter_navigates_and_reports_closure_over_a_private_dbus() {
     assert_eq!(notifications[2].replaces_id, id);
     assert!(notifications[2].actions.contains(&"stop".to_owned()));
     assert_eq!(*state.closed.lock().unwrap(), [id]);
+}
+
+#[tokio::test]
+async fn group_notifications_expose_two_step_actions_over_a_private_dbus() {
+    let bus = PrivateBus::spawn();
+    let state = Arc::new(FakeState::default());
+    let server = Builder::address(bus.address.as_str())
+        .unwrap()
+        .name(SERVICE)
+        .unwrap()
+        .serve_at(
+            PATH,
+            FakeNotifications {
+                state: Arc::clone(&state),
+                supports_actions: true,
+            },
+        )
+        .unwrap()
+        .build()
+        .await
+        .unwrap();
+    let client = Builder::address(bus.address.as_str())
+        .unwrap()
+        .build()
+        .await
+        .unwrap();
+    let (sender, mut events) = mpsc::channel(8);
+    let mut sink =
+        ZbusNotificationSink::connect_with_connection(client, sender, Duration::from_secs(15))
+            .await
+            .unwrap();
+
+    let group = stale_group();
+    let summary =
+        NotificationBinding::for_stale_workload_group(group.clone(), NotificationView::Summary);
+    let id = sink.notify(summary.request(), None).await.unwrap();
+    let details = summary
+        .transition(emitted_action(&server, &mut events, id, "details").await)
+        .unwrap();
+    assert_eq!(details.stale_workload_group().unwrap(), &group);
+    assert_eq!(sink.notify(details.request(), Some(id)).await.unwrap(), id);
+    let restored = details
+        .transition(emitted_action(&server, &mut events, id, "back").await)
+        .unwrap();
+    assert_eq!(restored.stale_workload_group().unwrap(), &group);
+    assert_eq!(sink.notify(restored.request(), Some(id)).await.unwrap(), id);
+
+    assert_eq!(
+        emitted_action(&server, &mut events, id, "stop_group").await,
+        NotificationAction::StopGroup
+    );
+
+    let notifications = state.notifications.lock().unwrap();
+    assert_eq!(notifications.len(), 3);
+    assert_eq!(notifications[0].actions, ["details", "Подробнее"]);
+    assert!(
+        notifications[0]
+            .summary
+            .contains("Stale workload group in alpha")
+    );
+    assert!(notifications[0].body.contains("Trees: 1"));
+    assert_eq!(notifications[1].replaces_id, id);
+    assert_eq!(
+        notifications[1].actions,
+        ["stop_group", "Завершить все деревья", "back", "Назад"]
+    );
+    assert!(notifications[1].body.contains("Root PIDs: 42"));
+    assert_eq!(notifications[2].replaces_id, id);
+    assert_eq!(notifications[2].actions, ["details", "Подробнее"]);
+}
+
+#[tokio::test]
+async fn no_action_server_receives_an_empty_action_list() {
+    let bus = PrivateBus::spawn();
+    let state = Arc::new(FakeState::default());
+    let _server = Builder::address(bus.address.as_str())
+        .unwrap()
+        .name(SERVICE)
+        .unwrap()
+        .serve_at(
+            PATH,
+            FakeNotifications {
+                state: Arc::clone(&state),
+                supports_actions: false,
+            },
+        )
+        .unwrap()
+        .build()
+        .await
+        .unwrap();
+    let client = Builder::address(bus.address.as_str())
+        .unwrap()
+        .build()
+        .await
+        .unwrap();
+    let (sender, _events) = mpsc::channel(8);
+    let mut sink =
+        ZbusNotificationSink::connect_with_connection(client, sender, Duration::from_secs(15))
+            .await
+            .unwrap();
+    assert!(!sink.supports_actions());
+
+    sink.notify(NotificationRequest::from_event(&monitor_event()), None)
+        .await
+        .unwrap();
+
+    let notifications = state.notifications.lock().unwrap();
+    assert_eq!(notifications.len(), 1);
+    assert!(notifications[0].actions.is_empty());
 }

@@ -33,6 +33,8 @@ exempt_executables = []
 [stale_workloads]
 enabled = true
 # Build the stale inventory always; only gate desktop notifications on pressure.
+# Set to false to receive the two-step actionable stale group notification
+# (summary "Подробнее" -> "Завершить все деревья"/"Назад") at Normal pressure.
 notify_only_under_memory_pressure = true
 candidate_names = ["pytest", "coverage", "black", "pre-commit"]
 launcher_names = ["uv", "pytest", "coverage", "black", "pre-commit"]

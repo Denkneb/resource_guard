@@ -1,6 +1,6 @@
 use std::{error::Error, fmt, time::Duration};
 
-use crate::domain::{ProcessDisposition, ProcessIdentity, ProtectionPolicy};
+use crate::domain::{ProcessDisposition, ProcessIdentity, ProtectionPolicy, StaleWorkloadGroup};
 
 use super::{
     ForceTerminationPort, MonotonicClock, PortError, ProcessSource, Sleeper, TerminationPort,
@@ -122,6 +122,65 @@ where
                 Err(StopError::NotFound { .. }) => {}
                 Err(error) => return Err(error),
             }
+        }
+        let mut signalled = 0;
+        for identity in validated {
+            match validate_process(self.source, identity, self.current_uid, self.protection) {
+                Ok(actual) => {
+                    self.terminator
+                        .terminate(actual)
+                        .map_err(StopError::Termination)?;
+                    signalled += 1;
+                }
+                Err(StopError::NotFound { .. }) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(signalled)
+    }
+}
+
+pub struct StopWorkloadGroup<'a, S, T> {
+    source: &'a mut S,
+    terminator: &'a mut T,
+    current_uid: u32,
+    protection: &'a ProtectionPolicy,
+}
+
+impl<'a, S, T> StopWorkloadGroup<'a, S, T>
+where
+    S: ProcessSource,
+    T: TerminationPort,
+{
+    pub fn new(
+        source: &'a mut S,
+        terminator: &'a mut T,
+        current_uid: u32,
+        protection: &'a ProtectionPolicy,
+    ) -> Self {
+        Self {
+            source,
+            terminator,
+            current_uid,
+            protection,
+        }
+    }
+
+    /// Strictly preflights the whole immutable group, then sends SIGTERM leaf-first.
+    ///
+    /// Unlike single-tree stop, a missing, changed, foreign, or protected member
+    /// aborts the entire group before the first signal, so a partially valid
+    /// snapshot never causes partial termination. Each survivor is revalidated
+    /// again immediately before its own signal.
+    ///
+    /// # Errors
+    /// Returns the first ownership, identity, protection, inspection, or signalling error.
+    pub fn execute(&mut self, group: &StaleWorkloadGroup) -> Result<usize, StopError> {
+        let mut validated = Vec::new();
+        for identity in group.termination_order() {
+            let actual =
+                validate_process(self.source, identity, self.current_uid, self.protection)?;
+            validated.push(actual);
         }
         let mut signalled = 0;
         for identity in validated {
@@ -359,7 +418,10 @@ mod tests {
         time::Duration,
     };
 
-    use super::{ForceStopProcess, StopAndWait, StopError, StopOutcome, StopProcess, StopWorkload};
+    use super::{
+        ForceStopProcess, StopAndWait, StopError, StopOutcome, StopProcess, StopWorkload,
+        StopWorkloadGroup,
+    };
     use crate::{
         application::{
             ForceTerminationPort, MonotonicClock, PortError, ProcessSource, ResourceSnapshot,
@@ -367,7 +429,7 @@ mod tests {
         },
         domain::{
             ProcessDescriptor, ProcessIdentity, ProcessResources, ProtectionPolicy, StaleWorkload,
-            WorkloadMember,
+            StaleWorkloadGroup, WorkloadMember,
         },
     };
 
@@ -422,6 +484,83 @@ mod tests {
             name,
             Some(PathBuf::from(format!("/usr/bin/{name}"))),
         )
+    }
+
+    fn member(identity: ProcessIdentity, name: &str, depth: usize) -> WorkloadMember {
+        WorkloadMember {
+            process: descriptor(identity, name),
+            resources: ProcessResources {
+                cpu_percent: 0.0,
+                resident_memory_bytes: 100,
+                virtual_memory_bytes: 100,
+                running_for: Duration::from_hours(1),
+                observed_at: Duration::ZERO,
+            },
+            depth,
+        }
+    }
+
+    fn two_tree_group() -> StaleWorkloadGroup {
+        let tree_a = StaleWorkload {
+            root: descriptor(ProcessIdentity::new(10, CURRENT_UID, 10), "uv"),
+            members: vec![
+                member(ProcessIdentity::new(10, CURRENT_UID, 10), "uv", 0),
+                member(ProcessIdentity::new(11, CURRENT_UID, 11), "pytest", 1),
+            ],
+            total_memory_bytes: 200,
+            total_cpu_percent: 0.0,
+            age: Duration::from_hours(1),
+        };
+        let tree_b = StaleWorkload {
+            root: descriptor(ProcessIdentity::new(20, CURRENT_UID, 20), "uv"),
+            members: vec![
+                member(ProcessIdentity::new(20, CURRENT_UID, 20), "uv", 0),
+                member(ProcessIdentity::new(21, CURRENT_UID, 21), "pytest", 1),
+            ],
+            total_memory_bytes: 200,
+            total_cpu_percent: 0.0,
+            age: Duration::from_hours(1),
+        };
+        StaleWorkloadGroup {
+            working_directory: PathBuf::from("/work/project"),
+            workloads: vec![tree_a, tree_b],
+            total_memory_bytes: 400,
+            total_cpu_percent: 0.0,
+            age: Duration::from_hours(1),
+        }
+    }
+
+    struct MapSource(HashMap<u32, ProcessDescriptor>);
+
+    impl ProcessSource for MapSource {
+        fn snapshot(&mut self) -> Result<ResourceSnapshot, PortError> {
+            unreachable!("snapshot is not used by the stop use case")
+        }
+
+        fn find(&mut self, pid: u32) -> Result<Option<ProcessDescriptor>, PortError> {
+            Ok(self.0.get(&pid).cloned())
+        }
+    }
+
+    fn full_group_source() -> MapSource {
+        MapSource(HashMap::from([
+            (
+                10,
+                descriptor(ProcessIdentity::new(10, CURRENT_UID, 10), "uv"),
+            ),
+            (
+                11,
+                descriptor(ProcessIdentity::new(11, CURRENT_UID, 11), "pytest"),
+            ),
+            (
+                20,
+                descriptor(ProcessIdentity::new(20, CURRENT_UID, 20), "uv"),
+            ),
+            (
+                21,
+                descriptor(ProcessIdentity::new(21, CURRENT_UID, 21), "pytest"),
+            ),
+        ]))
     }
 
     fn execute(
@@ -532,6 +671,93 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![11, 10]
         );
+    }
+
+    #[test]
+    fn stops_a_stale_workload_group_leaf_first_after_strict_preflight() {
+        let group = two_tree_group();
+        let mut source = full_group_source();
+        let mut terminator = FakeTerminator::default();
+
+        let count = StopWorkloadGroup::new(
+            &mut source,
+            &mut terminator,
+            CURRENT_UID,
+            &ProtectionPolicy::default(),
+        )
+        .execute(&group)
+        .unwrap();
+
+        assert_eq!(count, 4);
+        assert_eq!(
+            terminator
+                .terminated
+                .into_iter()
+                .map(ProcessIdentity::pid)
+                .collect::<Vec<_>>(),
+            vec![11, 10, 21, 20]
+        );
+    }
+
+    #[test]
+    fn rejects_a_protected_group_member_before_signalling_anything() {
+        let group = two_tree_group();
+        let mut source = full_group_source();
+        let mut terminator = FakeTerminator::default();
+        let protection = ProtectionPolicy::new(["uv".to_owned()], [], [], []);
+
+        let result = StopWorkloadGroup::new(&mut source, &mut terminator, CURRENT_UID, &protection)
+            .execute(&group);
+
+        assert_eq!(result, Err(StopError::Protected { pid: 10 }));
+        assert!(terminator.terminated.is_empty());
+    }
+
+    #[test]
+    fn rejects_a_changed_group_identity_before_signalling_anything() {
+        let group = two_tree_group();
+        let mut source = full_group_source();
+        source.0.insert(
+            20,
+            descriptor(ProcessIdentity::new(20, CURRENT_UID, 999), "uv"),
+        );
+        let mut terminator = FakeTerminator::default();
+
+        let result = StopWorkloadGroup::new(
+            &mut source,
+            &mut terminator,
+            CURRENT_UID,
+            &ProtectionPolicy::default(),
+        )
+        .execute(&group);
+
+        assert_eq!(
+            result,
+            Err(StopError::IdentityChanged {
+                expected: ProcessIdentity::new(20, CURRENT_UID, 20),
+                actual: ProcessIdentity::new(20, CURRENT_UID, 999),
+            })
+        );
+        assert!(terminator.terminated.is_empty());
+    }
+
+    #[test]
+    fn rejects_a_missing_group_identity_before_signalling_anything() {
+        let group = two_tree_group();
+        let mut source = full_group_source();
+        source.0.remove(&11);
+        let mut terminator = FakeTerminator::default();
+
+        let result = StopWorkloadGroup::new(
+            &mut source,
+            &mut terminator,
+            CURRENT_UID,
+            &ProtectionPolicy::default(),
+        )
+        .execute(&group);
+
+        assert_eq!(result, Err(StopError::NotFound { pid: 11 }));
+        assert!(terminator.terminated.is_empty());
     }
 
     #[test]

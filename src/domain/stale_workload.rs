@@ -50,8 +50,10 @@ impl StaleWorkload {
 /// A set of independent stale workload trees that share the same exact root
 /// working directory.
 ///
-/// A group is a reporting-only aggregate: it is never a termination boundary
-/// and intentionally exposes no `termination_order`.
+/// A group is not a termination boundary on its own. It becomes one only as an
+/// explicit, immutable identity snapshot collected through the two-step
+/// notification flow: the user first opens the details view and then confirms
+/// the group stop. The working directory never selects processes.
 #[derive(Clone, Debug, PartialEq)]
 pub struct StaleWorkloadGroup {
     pub working_directory: PathBuf,
@@ -79,6 +81,27 @@ impl StaleWorkloadGroup {
     #[must_use]
     pub fn root_identities(&self) -> Vec<ProcessIdentity> {
         self.workloads.iter().map(StaleWorkload::identity).collect()
+    }
+
+    /// Builds the deterministic, duplicate-free termination order of the whole
+    /// immutable group snapshot.
+    ///
+    /// Descendants of every tree precede their root, trees keep the stored
+    /// deterministic order, and each identity appears at most once. The working
+    /// directory is never used to select processes, and this method sends no
+    /// signals and does not depend on any Linux adapter.
+    #[must_use]
+    pub fn termination_order(&self) -> Vec<ProcessIdentity> {
+        let mut seen = HashSet::new();
+        let mut order = Vec::new();
+        for workload in &self.workloads {
+            for identity in workload.termination_order() {
+                if seen.insert(identity) {
+                    order.push(identity);
+                }
+            }
+        }
+        order
     }
 }
 
@@ -114,6 +137,43 @@ mod tests {
         }
     }
 
+    fn process(pid: u32, memory: u64, depth: usize) -> WorkloadMember {
+        WorkloadMember {
+            process: ProcessDescriptor::new(
+                ProcessIdentity::new(pid, 1_000, u64::from(pid)),
+                "pytest",
+                None,
+            ),
+            resources: ProcessResources {
+                cpu_percent: 0.0,
+                resident_memory_bytes: memory,
+                virtual_memory_bytes: memory,
+                running_for: Duration::from_hours(2),
+                observed_at: Duration::ZERO,
+            },
+            depth,
+        }
+    }
+
+    fn tree(root_pid: u32, root_memory: u64, children: &[(u32, u64)]) -> StaleWorkload {
+        let mut members = vec![process(root_pid, root_memory, 0)];
+        members.extend(
+            children
+                .iter()
+                .map(|(pid, memory)| process(*pid, *memory, 1)),
+        );
+        let total_memory_bytes = members.iter().fold(0_u64, |total, member| {
+            total + member.resources.resident_memory_bytes
+        });
+        StaleWorkload {
+            root: members[0].process.clone(),
+            members,
+            total_memory_bytes,
+            total_cpu_percent: 0.0,
+            age: Duration::from_hours(2),
+        }
+    }
+
     #[test]
     fn group_reports_tree_process_and_root_counts() {
         let group = StaleWorkloadGroup {
@@ -134,5 +194,68 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![10, 11]
         );
+    }
+
+    #[test]
+    fn group_termination_order_is_leaf_first_across_independent_trees() {
+        let group = StaleWorkloadGroup {
+            working_directory: PathBuf::from("/work/project"),
+            workloads: vec![
+                tree(10, 100, &[(11, 10), (12, 10)]),
+                tree(20, 100, &[(21, 10)]),
+            ],
+            total_memory_bytes: 330,
+            total_cpu_percent: 0.0,
+            age: Duration::from_hours(2),
+        };
+
+        let order = group
+            .termination_order()
+            .into_iter()
+            .map(ProcessIdentity::pid)
+            .collect::<Vec<_>>();
+
+        assert_eq!(order, vec![12, 11, 10, 21, 20]);
+    }
+
+    #[test]
+    fn group_termination_order_deduplicates_shared_identities_in_order() {
+        let group = StaleWorkloadGroup {
+            working_directory: PathBuf::from("/work/project"),
+            workloads: vec![tree(10, 100, &[(11, 10)]), tree(10, 100, &[(11, 10)])],
+            total_memory_bytes: 220,
+            total_cpu_percent: 0.0,
+            age: Duration::from_hours(2),
+        };
+
+        let order = group
+            .termination_order()
+            .into_iter()
+            .map(ProcessIdentity::pid)
+            .collect::<Vec<_>>();
+
+        assert_eq!(order, vec![11, 10]);
+    }
+
+    #[test]
+    fn group_termination_order_does_not_change_roots_or_totals() {
+        let group = StaleWorkloadGroup {
+            working_directory: PathBuf::from("/work/project"),
+            workloads: vec![tree(10, 100, &[(11, 10)])],
+            total_memory_bytes: 110,
+            total_cpu_percent: 0.0,
+            age: Duration::from_hours(2),
+        };
+        let roots_before = group.root_identities();
+        let trees_before = group.tree_count();
+        let processes_before = group.process_count();
+        let memory_before = group.total_memory_bytes;
+
+        let _ = group.termination_order();
+
+        assert_eq!(group.root_identities(), roots_before);
+        assert_eq!(group.tree_count(), trees_before);
+        assert_eq!(group.process_count(), processes_before);
+        assert_eq!(group.total_memory_bytes, memory_before);
     }
 }

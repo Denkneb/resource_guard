@@ -24,8 +24,9 @@ use crate::{
     application::{
         BackgroundWorkloadService, EmergencyService, ForceStopProcess, MemoryPressureMonitor,
         MonitorService, NotificationAction, NotificationBinding, NotificationBindings,
-        NotificationEvent, NotificationRequest, NotificationSink, NotificationView, ProcessSource,
-        StaleWorkloadService, StopProcess, StopWorkload,
+        NotificationDispatch, NotificationEvent, NotificationRequest, NotificationSink,
+        NotificationView, ProcessSource, StaleWorkloadService, StopProcess, StopWorkload,
+        StopWorkloadGroup, plan_notification,
     },
     domain::{
         EmergencyAction, EmergencyCandidate, IgnoreRule, MemoryPressureLevel,
@@ -603,10 +604,25 @@ async fn record_monitor_report(
         );
         if let Some(sink) = notifier.as_mut() {
             match sink
-                .notify(NotificationRequest::for_stale_workload_group(&group), None)
+                .notify(
+                    NotificationRequest::for_stale_workload_group(
+                        &group,
+                        NotificationView::Summary,
+                    ),
+                    None,
+                )
                 .await
             {
-                Ok(_) => state.write().await.clear_notification_error(),
+                Ok(notification_id) => {
+                    bindings.remember(
+                        notification_id,
+                        NotificationBinding::for_stale_workload_group(
+                            group,
+                            NotificationView::Summary,
+                        ),
+                    );
+                    state.write().await.clear_notification_error();
+                }
                 Err(error) => {
                     warn!(%error, "stale workload group notification failed");
                     state
@@ -733,31 +749,33 @@ async fn handle_notification_event(
             return;
         }
     };
-    let Some(binding) = bindings.get(notification_id).cloned() else {
-        warn!(
-            notification_id,
-            "ignoring action for an unknown notification"
-        );
+    let binding = bindings.get(notification_id).cloned();
+    let action = match plan_notification(binding.as_ref(), action) {
+        NotificationDispatch::Unknown => {
+            warn!(
+                notification_id,
+                "ignoring action for an unknown notification"
+            );
+            return;
+        }
+        NotificationDispatch::Rejected => {
+            warn!(
+                notification_id,
+                view = ?binding.as_ref().map(NotificationBinding::view),
+                ?action,
+                "ignoring notification action that is invalid for this binding"
+            );
+            return;
+        }
+        NotificationDispatch::Navigate(next_binding) => {
+            navigate_notification(notification_id, *next_binding, bindings, notifier, state).await;
+            return;
+        }
+        NotificationDispatch::Execute(action) => action,
+    };
+    let Some(binding) = binding else {
         return;
     };
-
-    if let Some(next_binding) = binding.transition(action) {
-        navigate_notification(notification_id, next_binding, bindings, notifier, state).await;
-        return;
-    }
-
-    if matches!(
-        action,
-        NotificationAction::Details | NotificationAction::Back
-    ) {
-        warn!(
-            notification_id,
-            view = ?binding.view(),
-            ?action,
-            "ignoring invalid notification navigation"
-        );
-        return;
-    }
 
     bindings.remove(notification_id);
     close_handled_notification(notifier, notification_id).await;
@@ -804,6 +822,42 @@ async fn handle_notification_event(
                         warn!(pid = identity.pid(), %error, "notification stop action rejected");
                     }
                 }
+            }
+        }
+        NotificationAction::StopGroup => {
+            let Some(group) = binding.stale_workload_group() else {
+                warn!(
+                    notification_id,
+                    "ignoring group stop without a stale workload group binding"
+                );
+                return;
+            };
+            let project = group
+                .working_directory
+                .file_name()
+                .map_or_else(String::new, |name| name.to_string_lossy().into_owned());
+            let tree_count = group.tree_count();
+            let process_count = group.process_count();
+            let mut source = SysinfoProcessSource::new();
+            let mut terminator = PidfdTerminationPort;
+            let policy = settings.protection_policy();
+            match StopWorkloadGroup::new(&mut source, &mut terminator, current_user_id(), &policy)
+                .execute(group)
+            {
+                Ok(count) => info!(
+                    project = %project,
+                    tree_count,
+                    process_count,
+                    count,
+                    "SIGTERM sent to stale workload group"
+                ),
+                Err(error) => warn!(
+                    project = %project,
+                    tree_count,
+                    process_count,
+                    %error,
+                    "stale workload group stop rejected"
+                ),
             }
         }
         NotificationAction::IgnoreForHour => {

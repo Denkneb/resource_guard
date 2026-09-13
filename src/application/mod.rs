@@ -20,15 +20,17 @@ pub use emergency::EmergencyService;
 pub use memory_pressure::MemoryPressureMonitor;
 pub use monitor::{MonitorEvent, MonitorReport, MonitorService, MonitoredProcess};
 pub use notifications::{
-    NotificationAction, NotificationBinding, NotificationBindings, NotificationCloseReason,
-    NotificationEvent, NotificationRequest, NotificationSink, NotificationView,
+    NotificationAction, NotificationActionSet, NotificationBinding, NotificationBindings,
+    NotificationCloseReason, NotificationDispatch, NotificationEvent, NotificationRequest,
+    NotificationSink, NotificationView, plan_notification,
 };
 pub use ports::{
     ForceTerminationPort, MemoryPressureSource, MonotonicClock, ObservedProcess, PortError,
     ProcessSource, ResourceSnapshot, Sleeper, TerminationPort,
 };
 pub use process_control::{
-    ForceStopProcess, StopAndWait, StopError, StopOutcome, StopProcess, StopWorkload, WaitForExit,
+    ForceStopProcess, StopAndWait, StopError, StopOutcome, StopProcess, StopWorkload,
+    StopWorkloadGroup, WaitForExit,
 };
 pub use stale_workloads::{
     StaleWorkloadDetection, StaleWorkloadEvaluation, StaleWorkloadService, detect_workloads,

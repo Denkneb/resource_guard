@@ -13,6 +13,7 @@ use super::{MonitorEvent, PortError};
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum NotificationAction {
     Stop,
+    StopGroup,
     IgnoreForHour,
     AlwaysIgnore,
     Details,
@@ -24,6 +25,7 @@ impl NotificationAction {
     pub fn from_key(key: &str) -> Option<Self> {
         match key {
             "stop" => Some(Self::Stop),
+            "stop_group" => Some(Self::StopGroup),
             "ignore_hour" => Some(Self::IgnoreForHour),
             "always_ignore" => Some(Self::AlwaysIgnore),
             "details" | "default" => Some(Self::Details),
@@ -31,6 +33,43 @@ impl NotificationAction {
             _ => None,
         }
     }
+}
+
+/// Explicit set of notification actions rendered for one view.
+///
+/// The request owns the profile so the adapter never has to infer destructive
+/// availability from the view alone.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NotificationActionSet {
+    None,
+    StandardSummary,
+    DetailsOnly,
+    BackOnly,
+    GroupDetails,
+}
+
+/// Decision for one incoming notification action, before any side effect.
+#[derive(Clone, Debug, PartialEq)]
+pub enum NotificationDispatch {
+    /// The notification ID is closed, evicted, or otherwise unknown.
+    Unknown,
+    /// Replace the current notification with the next view.
+    Navigate(Box<NotificationBinding>),
+    /// A permitted non-navigation action.
+    Execute(NotificationAction),
+    /// The action is not valid for the current subject or view.
+    Rejected,
+}
+
+/// Resolves an action against a binding, if any, without performing side effects.
+#[must_use]
+pub fn plan_notification(
+    binding: Option<&NotificationBinding>,
+    action: NotificationAction,
+) -> NotificationDispatch {
+    binding.map_or(NotificationDispatch::Unknown, |binding| {
+        binding.dispatch(action)
+    })
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -79,7 +118,7 @@ impl NotificationCloseReason {
 pub struct NotificationRequest {
     summary: String,
     body: String,
-    actions: bool,
+    action_set: NotificationActionSet,
     pub view: NotificationView,
 }
 
@@ -128,7 +167,7 @@ impl NotificationRequest {
                 event.process.identity().pid()
             ),
             body,
-            actions: true,
+            action_set: summary_details_action_set(view),
             view,
         }
     }
@@ -164,7 +203,7 @@ impl NotificationRequest {
         Self {
             summary: format!("System memory pressure: {:?}", evaluation.current),
             body,
-            actions: false,
+            action_set: NotificationActionSet::None,
             view: NotificationView::Summary,
         }
     }
@@ -196,23 +235,26 @@ impl NotificationRequest {
                 workload.identity().pid()
             ),
             body,
-            actions: true,
+            action_set: summary_details_action_set(view),
             view,
         }
     }
 
-    /// Builds a non-actionable summary for an aggregate stale workload group.
+    /// Builds the two-step aggregate stale workload group notification.
     ///
-    /// Only the directory basename is shown; the full path stays in the explicit
-    /// local CLI output.
+    /// The summary offers only `Подробнее`. The details clarify that the action
+    /// targets every listed independent workload tree from the immutable group
+    /// snapshot, sends `SIGTERM` only, and does not select parent terminal or
+    /// session processes. Only the directory basename is shown; the full path
+    /// stays in the explicit local CLI output.
     #[must_use]
-    pub fn for_stale_workload_group(group: &StaleWorkloadGroup) -> Self {
+    pub fn for_stale_workload_group(group: &StaleWorkloadGroup, view: NotificationView) -> Self {
         let directory = group.working_directory.file_name().map_or_else(
             || "unknown".to_owned(),
             |name| name.to_string_lossy().into_owned(),
         );
         let directory = escape_markup(&directory);
-        let body = format!(
+        let mut body = format!(
             "Project: {directory}\nTrees: {}\nProcesses: {}\nGroup RAM: {} MiB\nGroup CPU: {:.1}%\nAge: {}\nReason: multiple long-lived low-CPU workload trees from one project",
             group.tree_count(),
             group.process_count(),
@@ -220,6 +262,17 @@ impl NotificationRequest {
             group.total_cpu_percent,
             format_duration(group.age),
         );
+        let action_set = match view {
+            NotificationView::Summary => NotificationActionSet::DetailsOnly,
+            NotificationView::Details => {
+                let root_pids = bounded_root_pid_list(group);
+                let _ = write!(
+                    body,
+                    "\nThis action sends SIGTERM to all listed independent workload trees\nParent terminal/session processes are not selected automatically\nRoot PIDs: {root_pids}",
+                );
+                NotificationActionSet::GroupDetails
+            }
+        };
         Self {
             summary: format!(
                 "Stale workload group in {directory}: {} trees, {} processes",
@@ -227,8 +280,8 @@ impl NotificationRequest {
                 group.process_count()
             ),
             body,
-            actions: false,
-            view: NotificationView::Summary,
+            action_set,
+            view,
         }
     }
 
@@ -262,14 +315,14 @@ impl NotificationRequest {
                 workload.identity().pid()
             ),
             body,
-            actions: true,
+            action_set: summary_details_action_set(view),
             view,
         }
     }
 
     #[must_use]
-    pub const fn has_actions(&self) -> bool {
-        self.actions
+    pub const fn action_set(&self) -> NotificationActionSet {
+        self.action_set
     }
 
     #[must_use]
@@ -293,6 +346,7 @@ pub struct NotificationBinding {
 enum NotificationSubject {
     Process(MonitorEvent),
     Workload(StaleWorkload),
+    StaleWorkloadGroup(StaleWorkloadGroup),
     BackgroundWorkload(BackgroundWorkload),
 }
 
@@ -314,6 +368,17 @@ impl NotificationBinding {
     }
 
     #[must_use]
+    pub const fn for_stale_workload_group(
+        group: StaleWorkloadGroup,
+        view: NotificationView,
+    ) -> Self {
+        Self {
+            subject: NotificationSubject::StaleWorkloadGroup(group),
+            view,
+        }
+    }
+
+    #[must_use]
     pub const fn for_background_workload(
         workload: BackgroundWorkload,
         view: NotificationView,
@@ -328,7 +393,9 @@ impl NotificationBinding {
     pub const fn event(&self) -> Option<&MonitorEvent> {
         match &self.subject {
             NotificationSubject::Process(event) => Some(event),
-            NotificationSubject::Workload(_) | NotificationSubject::BackgroundWorkload(_) => None,
+            NotificationSubject::Workload(_)
+            | NotificationSubject::StaleWorkloadGroup(_)
+            | NotificationSubject::BackgroundWorkload(_) => None,
         }
     }
 
@@ -336,7 +403,19 @@ impl NotificationBinding {
     pub const fn workload(&self) -> Option<&StaleWorkload> {
         match &self.subject {
             NotificationSubject::Workload(workload) => Some(workload),
-            NotificationSubject::Process(_) | NotificationSubject::BackgroundWorkload(_) => None,
+            NotificationSubject::Process(_)
+            | NotificationSubject::StaleWorkloadGroup(_)
+            | NotificationSubject::BackgroundWorkload(_) => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn stale_workload_group(&self) -> Option<&StaleWorkloadGroup> {
+        match &self.subject {
+            NotificationSubject::StaleWorkloadGroup(group) => Some(group),
+            NotificationSubject::Process(_)
+            | NotificationSubject::Workload(_)
+            | NotificationSubject::BackgroundWorkload(_) => None,
         }
     }
 
@@ -344,7 +423,9 @@ impl NotificationBinding {
     pub const fn background_workload(&self) -> Option<&BackgroundWorkload> {
         match &self.subject {
             NotificationSubject::BackgroundWorkload(workload) => Some(workload),
-            NotificationSubject::Process(_) | NotificationSubject::Workload(_) => None,
+            NotificationSubject::Process(_)
+            | NotificationSubject::Workload(_)
+            | NotificationSubject::StaleWorkloadGroup(_) => None,
         }
     }
 
@@ -359,6 +440,9 @@ impl NotificationBinding {
             NotificationSubject::Process(event) => NotificationRequest::for_view(event, self.view),
             NotificationSubject::Workload(workload) => {
                 NotificationRequest::for_stale_workload(workload, self.view)
+            }
+            NotificationSubject::StaleWorkloadGroup(group) => {
+                NotificationRequest::for_stale_workload_group(group, self.view)
             }
             NotificationSubject::BackgroundWorkload(workload) => {
                 NotificationRequest::for_background_workload(workload, self.view)
@@ -377,6 +461,32 @@ impl NotificationBinding {
             subject: self.subject.clone(),
             view,
         })
+    }
+
+    /// Classifies an action for this binding without performing any side effect.
+    ///
+    /// The destructive group stop is accepted only for a stale workload group
+    /// binding currently in the details view, so a forged action on the summary
+    /// or after navigating back is rejected. Single-tree stop and ignore actions
+    /// are accepted only for non-group subjects.
+    #[must_use]
+    pub fn dispatch(&self, action: NotificationAction) -> NotificationDispatch {
+        if let Some(next) = self.transition(action) {
+            return NotificationDispatch::Navigate(Box::new(next));
+        }
+        let is_group = self.stale_workload_group().is_some();
+        let permitted = match action {
+            NotificationAction::Details | NotificationAction::Back => false,
+            NotificationAction::StopGroup => is_group && self.view == NotificationView::Details,
+            NotificationAction::Stop
+            | NotificationAction::IgnoreForHour
+            | NotificationAction::AlwaysIgnore => !is_group,
+        };
+        if permitted {
+            NotificationDispatch::Execute(action)
+        } else {
+            NotificationDispatch::Rejected
+        }
     }
 }
 
@@ -435,6 +545,31 @@ impl NotificationBindings {
     }
 }
 
+const MAX_NOTIFICATION_ROOT_PIDS: usize = 20;
+
+const fn summary_details_action_set(view: NotificationView) -> NotificationActionSet {
+    match view {
+        NotificationView::Summary => NotificationActionSet::StandardSummary,
+        NotificationView::Details => NotificationActionSet::BackOnly,
+    }
+}
+
+fn bounded_root_pid_list(group: &StaleWorkloadGroup) -> String {
+    let identities = group.root_identities();
+    let shown = identities
+        .iter()
+        .take(MAX_NOTIFICATION_ROOT_PIDS)
+        .map(|identity| identity.pid().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let remaining = identities.len().saturating_sub(MAX_NOTIFICATION_ROOT_PIDS);
+    if remaining > 0 {
+        format!("{shown} and {remaining} more")
+    } else {
+        shown
+    }
+}
+
 fn escape_markup(value: &str) -> String {
     value
         .replace('&', "&amp;")
@@ -474,15 +609,16 @@ mod tests {
     use std::{path::PathBuf, time::Duration};
 
     use super::{
-        NotificationAction, NotificationBinding, NotificationBindings, NotificationCloseReason,
-        NotificationRequest, NotificationSink, NotificationView,
+        NotificationAction, NotificationActionSet, NotificationBinding, NotificationBindings,
+        NotificationCloseReason, NotificationDispatch, NotificationRequest, NotificationSink,
+        NotificationView, plan_notification,
     };
     use crate::{
         application::{MonitorEvent, PortError},
         domain::{
             BackgroundWorkload, MemoryPressureEvaluation, MemoryPressureLevel,
             MemoryPressureSample, MemoryPsi, ProcessDescriptor, ProcessIdentity, ProcessResources,
-            ResourceBreach, StaleWorkload, SystemResources, WorkloadMember,
+            ResourceBreach, StaleWorkload, StaleWorkloadGroup, SystemResources, WorkloadMember,
         },
     };
 
@@ -630,7 +766,7 @@ mod tests {
         assert!(request.summary().contains("Critical"));
         assert!(request.body().contains("Action: SIGTERM sent"));
         assert!(request.body().contains("Automatic action: permitted"));
-        assert!(!request.has_actions());
+        assert_eq!(request.action_set(), NotificationActionSet::None);
     }
 
     #[test]
@@ -649,7 +785,7 @@ mod tests {
         assert!(request.body().contains("RAM: 256 MiB (+128 MiB)"));
         assert!(request.body().contains("CPU: 1.2%"));
         assert!(request.body().contains("Running for: 2d 3h 14m"));
-        assert!(request.has_actions());
+        assert_eq!(request.action_set(), NotificationActionSet::StandardSummary);
     }
 
     #[test]
@@ -704,43 +840,211 @@ mod tests {
         assert!(restored.event().is_none());
     }
 
-    #[test]
-    fn stale_group_notification_is_non_actionable_and_hides_the_full_path() {
-        let group = crate::domain::StaleWorkloadGroup {
-            working_directory: PathBuf::from("/home/user/secret-project/alpha"),
-            workloads: vec![workload()],
-            total_memory_bytes: 700 * 1_048_576,
-            total_cpu_percent: 0.3,
+    fn group(tree_count: usize) -> StaleWorkloadGroup {
+        let workloads = (0..tree_count)
+            .map(|index| {
+                let pid = 100 + u32::try_from(index).unwrap();
+                let mut workload = workload();
+                workload.root = ProcessDescriptor::new(
+                    ProcessIdentity::new(pid, 1_000, u64::from(pid)),
+                    "pytest",
+                    None,
+                );
+                workload.members = vec![WorkloadMember {
+                    process: workload.root.clone(),
+                    resources: ProcessResources {
+                        cpu_percent: 0.0,
+                        resident_memory_bytes: 256 * 1_048_576,
+                        virtual_memory_bytes: 256 * 1_048_576,
+                        running_for: Duration::from_hours(2),
+                        observed_at: Duration::ZERO,
+                    },
+                    depth: 0,
+                }];
+                workload
+            })
+            .collect();
+        StaleWorkloadGroup {
+            working_directory: PathBuf::from("/work/project"),
+            total_memory_bytes: 256 * 1_048_576 * u64::try_from(tree_count).unwrap(),
+            workloads,
+            total_cpu_percent: 0.0,
             age: Duration::from_hours(72),
-        };
+        }
+    }
 
-        let request = NotificationRequest::for_stale_workload_group(&group);
+    #[test]
+    fn stale_group_summary_is_details_only_and_hides_the_full_path() {
+        let group = group(3);
 
-        assert!(!request.has_actions());
-        assert!(request.summary().contains("alpha"));
-        assert!(request.body().contains("Trees: 1"));
-        assert!(request.body().contains("Group RAM: 700 MiB"));
-        assert!(!request.summary().contains("/home/user/secret-project"));
-        assert!(!request.body().contains("/home/user/secret-project"));
+        let request =
+            NotificationRequest::for_stale_workload_group(&group, NotificationView::Summary);
+
+        assert_eq!(request.action_set(), NotificationActionSet::DetailsOnly);
+        assert!(request.summary().contains("project"));
+        assert!(request.body().contains("Trees: 3"));
+        assert!(request.body().contains("Processes: 3"));
+        assert!(request.body().contains("Group RAM: 768 MiB"));
+        assert!(!request.summary().contains("/work/project"));
+        assert!(!request.body().contains("/work/project"));
+    }
+
+    #[test]
+    fn stale_group_details_offer_group_actions_and_bound_the_root_pid_list() {
+        let group = group(25);
+
+        let request =
+            NotificationRequest::for_stale_workload_group(&group, NotificationView::Details);
+
+        assert_eq!(request.action_set(), NotificationActionSet::GroupDetails);
+        assert!(
+            request
+                .body()
+                .contains("all listed independent workload trees")
+        );
+        assert!(request.body().contains("SIGTERM"));
+        assert!(request.body().contains("Parent terminal/session"));
+        assert!(request.body().contains("Root PIDs:"));
+        assert!(request.body().contains("119"));
+        assert!(request.body().contains("and 5 more"));
+        assert!(!request.body().contains("120,"));
+    }
+
+    #[test]
+    fn stale_group_binding_keeps_the_immutable_group_across_navigation() {
+        let group = group(4);
+        let summary =
+            NotificationBinding::for_stale_workload_group(group.clone(), NotificationView::Summary);
+
+        let details = summary.transition(NotificationAction::Details).unwrap();
+        assert_eq!(details.view(), NotificationView::Details);
+        assert_eq!(
+            details.stale_workload_group().unwrap(),
+            &group,
+            "details must keep the exact immutable group"
+        );
+        assert!(details.event().is_none());
+        assert!(details.workload().is_none());
+        assert!(details.background_workload().is_none());
+
+        let restored = details.transition(NotificationAction::Back).unwrap();
+        assert_eq!(restored.view(), NotificationView::Summary);
+        assert_eq!(restored.stale_workload_group().unwrap(), &group);
     }
 
     #[test]
     fn stale_group_notification_escapes_the_directory_name() {
-        let group = crate::domain::StaleWorkloadGroup {
-            working_directory: PathBuf::from("/tmp/<evil&dir>"),
-            workloads: vec![workload()],
-            total_memory_bytes: 700 * 1_048_576,
-            total_cpu_percent: 0.3,
-            age: Duration::from_hours(72),
-        };
+        let mut group = group(1);
+        group.working_directory = PathBuf::from("/tmp/<evil&dir>");
 
-        let request = NotificationRequest::for_stale_workload_group(&group);
+        let request =
+            NotificationRequest::for_stale_workload_group(&group, NotificationView::Summary);
 
         assert!(request.summary().contains("&lt;evil&amp;dir&gt;"));
     }
 
     #[test]
-    fn parses_only_known_action_keys() {
+    fn group_stop_is_dispatched_only_from_the_details_view() {
+        let group = group(2);
+        let summary =
+            NotificationBinding::for_stale_workload_group(group.clone(), NotificationView::Summary);
+        let details =
+            NotificationBinding::for_stale_workload_group(group.clone(), NotificationView::Details);
+
+        assert_eq!(
+            summary.dispatch(NotificationAction::Details),
+            NotificationDispatch::Navigate(Box::new(
+                NotificationBinding::for_stale_workload_group(group, NotificationView::Details),
+            ))
+        );
+        assert_eq!(
+            details.dispatch(NotificationAction::StopGroup),
+            NotificationDispatch::Execute(NotificationAction::StopGroup)
+        );
+        assert_eq!(
+            summary.dispatch(NotificationAction::StopGroup),
+            NotificationDispatch::Rejected
+        );
+
+        let back = details.transition(NotificationAction::Back).unwrap();
+        assert_eq!(back.view(), NotificationView::Summary);
+        assert_eq!(
+            back.dispatch(NotificationAction::StopGroup),
+            NotificationDispatch::Rejected
+        );
+    }
+
+    #[test]
+    fn group_binding_rejects_single_stop_and_ignore_actions() {
+        let details =
+            NotificationBinding::for_stale_workload_group(group(2), NotificationView::Details);
+
+        for action in [
+            NotificationAction::Stop,
+            NotificationAction::IgnoreForHour,
+            NotificationAction::AlwaysIgnore,
+        ] {
+            assert_eq!(details.dispatch(action), NotificationDispatch::Rejected);
+        }
+    }
+
+    #[test]
+    fn group_stop_is_rejected_for_non_group_subjects() {
+        let details = NotificationBinding::new(event(), NotificationView::Details);
+
+        assert_eq!(
+            details.dispatch(NotificationAction::StopGroup),
+            NotificationDispatch::Rejected
+        );
+        assert_eq!(
+            details.dispatch(NotificationAction::Stop),
+            NotificationDispatch::Execute(NotificationAction::Stop)
+        );
+    }
+
+    #[test]
+    fn unknown_notification_ids_are_an_unknown_dispatch() {
+        assert_eq!(
+            plan_notification(None, NotificationAction::StopGroup),
+            NotificationDispatch::Unknown
+        );
+        assert_eq!(
+            plan_notification(None, NotificationAction::Stop),
+            NotificationDispatch::Unknown
+        );
+    }
+
+    #[test]
+    fn ordinary_bindings_keep_their_action_sets() {
+        assert_eq!(
+            NotificationRequest::from_event(&event()).action_set(),
+            NotificationActionSet::StandardSummary
+        );
+        assert_eq!(
+            NotificationRequest::details(&event()).action_set(),
+            NotificationActionSet::BackOnly
+        );
+        assert_eq!(
+            NotificationRequest::for_stale_workload(&workload(), NotificationView::Summary)
+                .action_set(),
+            NotificationActionSet::StandardSummary
+        );
+        assert_eq!(
+            NotificationRequest::for_background_workload(
+                &background_workload(),
+                NotificationView::Summary,
+            )
+            .action_set(),
+            NotificationActionSet::StandardSummary
+        );
+    }
+
+    #[test]
+    fn parses_stop_group_only_from_the_exact_key() {
+        assert_eq!(
+            NotificationAction::from_key("stop_group"),
+            Some(NotificationAction::StopGroup)
+        );
         assert_eq!(
             NotificationAction::from_key("stop"),
             Some(NotificationAction::Stop)
@@ -753,6 +1057,10 @@ mod tests {
             NotificationAction::from_key("back"),
             Some(NotificationAction::Back)
         );
+        assert_eq!(NotificationAction::from_key("stop-group"), None);
+        assert_eq!(NotificationAction::from_key("group_stop"), None);
+        assert_eq!(NotificationAction::from_key("STOP_GROUP"), None);
+        assert_eq!(NotificationAction::from_key("stop_grouping"), None);
         assert_eq!(NotificationAction::from_key("unknown"), None);
     }
 
