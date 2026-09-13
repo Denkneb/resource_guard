@@ -7,6 +7,21 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-09-13
+
+### Added
+
+- Added a two-step desktop notification flow for aggregate stale workload
+  groups: the summary opens details, where the user can explicitly send
+  `SIGTERM` to every tree in the captured group.
+
+### Security
+
+- Bound group actions to an immutable identity snapshot, require the details
+  view, strictly preflight the complete group before the first signal, and
+  revalidate every PID, UID, and Linux start time immediately before signalling.
+  Group actions never use `SIGKILL` and are never automatic.
+
 ## [0.5.1] - 2026-09-13
 
 ### Fixed
@@ -101,7 +116,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - Unit, adapter, CLI, process-signalling, packaging, and resource-baseline tests.
 - CI, dependency policy checks, Dependabot, and local pre-commit/pre-push hooks.
 
-[Unreleased]: https://github.com/Denkneb/resource_guard/compare/v0.5.1...HEAD
+[Unreleased]: https://github.com/Denkneb/resource_guard/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/Denkneb/resource_guard/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/Denkneb/resource_guard/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/Denkneb/resource_guard/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/Denkneb/resource_guard/compare/v0.3.0...v0.4.0

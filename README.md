@@ -49,9 +49,9 @@ The measured release daemon uses 8.00 MiB peak RSS and averages 0.779% of one lo
 Release archives currently target 64-bit glibc-based Linux (`x86_64-unknown-linux-gnu`). Download the archive and its `.sha256` file from the corresponding GitHub release, then verify and extract it:
 
 ```console
-sha256sum --check resource-guard-0.5.1-x86_64-unknown-linux-gnu.tar.gz.sha256
-tar -xzf resource-guard-0.5.1-x86_64-unknown-linux-gnu.tar.gz
-cd resource-guard-0.5.1-x86_64-unknown-linux-gnu
+sha256sum --check resource-guard-0.6.0-x86_64-unknown-linux-gnu.tar.gz.sha256
+tar -xzf resource-guard-0.6.0-x86_64-unknown-linux-gnu.tar.gz
+cd resource-guard-0.6.0-x86_64-unknown-linux-gnu
 ```
 
 Install the extracted binary and user service without `sudo`:
