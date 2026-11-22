@@ -54,6 +54,6 @@ jobs:
         run: cargo audit
 
       - name: Check dependency policy
-        uses: EmbarkStudios/cargo-deny-action@v2.1.1
+        uses: EmbarkStudios/cargo-deny-action@v2.1.3
         with:
           command: check advisories bans licenses sources
